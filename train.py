@@ -348,7 +348,7 @@ def main():
     # ===================================
 
     # num_epochs = the actual epoch where we are (additional_epochs = how much more to train)
-    num_epochs = 100
+    num_epochs = 42
     accumulation_steps = 1
 
     checkpoint_best_path = os.path.join(os.getcwd(), "yolov3_general_checkpoint_best.pth")
@@ -1233,10 +1233,10 @@ def main():
     start_epoch = 0
     best_mAP = 0.0
 
-    additional_epochs = 0
+    additional_epochs = 58
 
     # Manual checkpoint control
-    force_manual_resume = False # Set True only when want to resume from a manually fixed checkpoint
+    force_manual_resume = True # Set True only when want to resume from a manually fixed checkpoint
     manual_ckpt_path = os.path.join(os.getcwd(), "yolov3_checkpoint_last_epoch.pth")
 
     # Manual switch (Option 1 will switch it anyway)

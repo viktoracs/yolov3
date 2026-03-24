@@ -506,10 +506,11 @@ def yolo_loss(pred, target, anchors, num_classes, scale_name="unknown"):
     # Boosts box regression, since "where?" is more important than "what?" in the beginning (this is a zero-sum game for gradient sharing - how to spend the budget?)
     lambda_box = 5.0
 
-    # Objectness is the "glue" between regression and classification      
+    # Objectness is the "glue" between regression and classification. Scales the loss on positive anchors (make true object anchors confident).      
     lambda_obj = 1.0
 
     # Encourages the model to predicted objects (more FPs) instead of playing safe ("There is no object." - FN) in the early phase of the training.
+    # Scales the loss on background anchors (make background anchors unconfident).
     lambda_noobj = 1.0
     
     # The model must learn first where objects are (regression + objectness) before it can learn what they are (classification).
