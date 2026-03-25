@@ -511,7 +511,7 @@ def yolo_loss(pred, target, anchors, num_classes, scale_name="unknown"):
 
     # Encourages the model to predicted objects (more FPs) instead of playing safe ("There is no object." - FN) in the early phase of the training.
     # Scales the loss on background anchors (make background anchors unconfident).
-    lambda_noobj = 1.0
+    lambda_noobj = 2.0
     
     # The model must learn first where objects are (regression + objectness) before it can learn what they are (classification).
     # Overweighting classification too early risks destabilizing anchor matching and objectness learning.
@@ -527,8 +527,9 @@ def yolo_loss(pred, target, anchors, num_classes, scale_name="unknown"):
     # Removed after epoch 130, since the loss values were already normalized (the classification branch got much less gradients)
     # Loss magnitude should be independent of batch size
 
-    # Prevent logit saturation (overlapping boxes with 1.0 confidence -> NMS cannot rank) -> regularization on logits
-    # Why? Because I apply Adam + OneCycle with YOLOv3 style implementation (more aggressive than the original SGD).
+    # Prevent logit saturation (overlapping boxes with 1.0 confidence -> NMS cannot rank).
+    # Training regularization on logits, not standard YOLOv3.
+    # Why? Because Adam + OneCycle are applied with YOLOv3 style implementation (more aggressive than the original SGD).
     """
     logit_penalty = 1e-4 * (
         pred_class.pow(2).mean() +
