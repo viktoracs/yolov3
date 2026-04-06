@@ -21,7 +21,7 @@ class COCO_Dataset(Dataset):
         self.coco = COCO(annotation_file)
         self.transform = transform
 
-        # Create COCO ID -> Model Index mapping inside COCO_Dataset
+        # Create COCO ID -> Model index mapping inside COCO_Dataset
         coco_category_ids = sorted(self.coco.getCatIds())  # Get sorted COCO category IDs
         self.coco_id_to_model_index = {coco_id: idx for idx, coco_id in enumerate(coco_category_ids)} # Example: {1: 0, ... 18: 16, ...}
 
@@ -33,7 +33,7 @@ class COCO_Dataset(Dataset):
             else:
                 raise ValueError(f"[E] Fixed image ID {fixed_image_id} not found in dataset!")
         else:
-            self.image_ids = self.coco.getImgIds()  # ensures only valid image_ids present in GT
+            self.image_ids = self.coco.getImgIds()  # Ensures only valid image_ids are present in GT
 
             # Constrain to a smaller subset if specified
             if subset_size is not None and subset_size < len(self.image_ids):
@@ -126,7 +126,7 @@ class COCO_Dataset(Dataset):
 
                 # Convert back HSV -> RGB
                 image = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
-        
+                
         # Apply transformations
         if self.transform:
 

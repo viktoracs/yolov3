@@ -1,5 +1,5 @@
 """
-Minimal YOLOv3 Debug Visualizer (CONSISTENT with your current yolo_loss.py).
+Minimal YOLOv3 Debug Visualizer (consistent with yolo_loss.py).
 Safe to run during training.
 
 Loads a checkpoint, picks an image, generates:
@@ -8,9 +8,9 @@ Loads a checkpoint, picks an image, generates:
     - Predicted class-confidence heatmaps
     - Decoded prediction overlay on the image
     - Loss heatmaps computed in the SAME coordinate system as yolo_loss.py:
-        * xy loss in pixel space ( (sigmoid(xy)+grid)*stride )
-        * wh loss in log-space using anchors + exp(tw/th)
-        * obj/cls maps shown for POSITIVES ONLY (debug sanity)
+        xy loss in pixel space ((sigmoid(xy)+grid) * stride)
+        wh loss in log-space using anchors + exp(tw/th)
+        obj/cls maps shown for POSITIVES ONLY (debug sanity)
 """
 
 import torch
@@ -382,8 +382,6 @@ def main():
         outputs,
         anchors=scaled_anchors,
         num_classes=num_classes,
-        # image_w=orig_size[1],
-        # image_h=orig_size[0],
         image_w = 416,
         image_h = 416,
         conf_threshold=0.5,

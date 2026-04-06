@@ -37,7 +37,7 @@ from logger import logger
 | Stable loss weights
 | Ignore mask to overlapping anchors
 | FP32 instead of FP16 for numerical stability (deleted AMP)
-| Correct class normalization (/ num_pos_class + removed / batch_size -> double normalization)
+| Correct class normalization (/num_pos_class, removed /batch_size = double normalization)
 """
 
 # ======
@@ -50,9 +50,8 @@ from logger import logger
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", message="expandable_segments not supported")
 
-# Helper tool (use directly in the "yolov3_env" terminal after typing "python")
-# Forces the epoch number manually if needed (check the saving strategy below).
-# Use a Python REPL (type "python") in the yolov3_env terminal and run:
+# Helper (directly in the "yolov3_env" terminal after typing "python")
+# Forces the epoch number manually if needed (after a crash).
 """
 import torch
 ckpt = torch.load("yolov3_checkpoint_last_epoch.pth", map_location="cpu")
@@ -64,9 +63,7 @@ print("Epoch number corrected to 20")
 # Checks the actual epoch number for the saved model:
 """
 import torch
-
 ckpt = torch.load("yolov3_checkpoint_last_epoch.pth", map_location="cpu")
-
 print(ckpt.keys())   
 print("Epoch:", ckpt.get('epoch'))
 """
@@ -207,7 +204,7 @@ def collate_fn(batch):
 
     # Convert labels to tensors
     # label.clone() - deep copy: prevents modifications to the original label
-    # detach() - detaches the tensor from the current computation graph (doesn’t track gradients)
+    # detach() - detaches the tensor from the current computation graph (no gradient tracking)
     # long() - casts the tensor to torch.int64, the standard dtype for class labels in PyTorch
     processed_labels = [label.clone().detach().long() for label in labels]
     
@@ -217,7 +214,7 @@ def collate_fn(batch):
     # Padding logic
     max_boxes = max(box.shape[0] for box in boxes) # Finds the maximum number of bounding boxes across all images in the batch
     padded_boxes = torch.zeros((len(boxes), max_boxes, 4), dtype=torch.float32) # Creates a zero-filled tensor to hold all bounding boxes
-    padded_labels = torch.full((len(labels), max_boxes), fill_value=-1, dtype=torch.long) # Creates a tensor filled with -1 to hold class labels (Why? Person is class 0, so -1 indicates padded values.)
+    padded_labels = torch.full((len(labels), max_boxes), fill_value=-1, dtype=torch.long) # Creates a tensor filled with -1 to hold class labels (Why? Person is class 0, so -1 indicates padded values)
 
     for i in range(len(boxes)):
         if boxes[i].shape[0] > 0:
@@ -342,7 +339,6 @@ def main():
     #     'model_state_dict': model weights
     #     'optimizer_state_dict': optimizer state (e.g. momentum, LR)
     #     'scheduler_state_dict': LR scheduler state (e.g. position in cycle/decay) -> ONLY IF use_scheduler = True 
-    #     'scaler_state_dict': GradScaler state (for MP) -> NOT used anymore
     #     'best_mAP': best validation score seen so far
     # }
     # ===================================
@@ -361,7 +357,6 @@ def main():
             train_dataloader, 
             optimizer, 
             scheduler, 
-            # scaler, 
             device, 
             num_epochs, 
             accumulation_steps, 
@@ -482,7 +477,7 @@ def main():
                     assert not torch.isnan(target).any(), f"[E] NaN detected in {name} target tensor!"
                     assert not torch.isinf(target).any(), f"[E] Inf detected in {name} target tensor!"
 
-                # HARD STOP if input is bad (this catches NaNs coming from dataset/augmentations)
+                # HARD STOP if input is bad (catches NaNs coming from dataset/augmentations)
                 if not torch.isfinite(images).all():
                     bad = (~torch.isfinite(images)).sum().item()
                     print(f"[E] Non-finite values in IMAGES: count={bad}")
@@ -497,12 +492,6 @@ def main():
                     if not torch.isfinite(param).all():
                         print(f"[E] NaN in weights BEFORE forward: {name}")
                         raise RuntimeError("Weights corrupted before forward")
-
-                # Forward pass with mixed precision 
-                """
-                with torch.amp.autocast(device_type="cuda"):
-                    outputs = model(images)  # Each feature map has shape: [B, num_anchors * (5 + num_classes), H, W]
-                """
 
                 outputs = model(images)
 
@@ -617,62 +606,15 @@ def main():
                 cuda_memory_history.append((allocated, max_allocated))
                 
                 # Backward pass and optimization
-                # scaler.scale(loss).backward()
                 loss.backward()
 
                 if (step + 1) % accumulation_steps == 0 or (step + 1) == len(train_dataloader):
                                        
-                    # scaler.unscale_(optimizer) 
-                    
                     # Training becomes smoother especially with OneCycle LR                
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
                     
                     optimizer.step()
                     
-                    """
-                    scaler.step(optimizer)
-                    
-                    scaler.update()
-
-                    scale = scaler.get_scale()
-                    print(f"[AMP] GradScaler scale={scale}")
-
-                    # Check weights after optimizer step
-                    for name, param in model.named_parameters():
-                        if not torch.isfinite(param).all():
-                            print(f"[E] NaN in weights AFTER step: {name}")
-                            raise RuntimeError("Weights corrupted after optimizer step")
-
-
-                    # This is the only correct place to step OneCycleLR
-                    # Step scheduler only after at least one optimizer step
-                    if scheduler is not None:
-                        scheduler.step()
-
-                    if step % 200 == 0:
-                        print(f"[LR] epoch={epoch}, step={step}, lr={optimizer.param_groups[0]['lr']}")
-                    
-                    optimizer.zero_grad()
-                    """
-
-                    # Detect AMP overflow properly
-                    # scale_before = scaler.get_scale()
-
-                    # scaler.step(optimizer)   # may be skipped internally
-                    # scaler.update()
-
-                    # scale_after = scaler.get_scale()
-                    
-                    """
-                    overflow = scale_after < scale_before
-
-                    print(f"[AMP] GradScaler scale={scale_after}")
-
-                    if overflow:
-                        print(f"[AMP] Overflow detected → optimizer.step() skipped "
-                            f"(scale {scale_before} → {scale_after})")
-                    """
-
                     # Only step scheduler if optimizer actually updated
                     if scheduler is not None:
                         scheduler.step()
@@ -710,10 +652,6 @@ def main():
                 max_allocated = torch.cuda.max_memory_allocated() / 1024 / 1024  # Convert to MB
                 cuda_memory_history.append((allocated, max_allocated))
 
-                # Explicit garbage collection
-                # gc.collect()
-                # torch.cuda.empty_cache()
-
             # Log fix
             num_batches = len(train_dataloader)
             
@@ -733,7 +671,6 @@ def main():
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
-                # 'scaler_state_dict': scaler.state_dict(),
                 'best_mAP': best_mAP
             }, "yolov3_checkpoint_last_epoch.pth")
             print(f"[I] Saved checkpoint for epoch {epoch+1} (last).")
@@ -765,7 +702,6 @@ def main():
                         'model_state_dict': model.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),
                         'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
-                        # 'scaler_state_dict': scaler.state_dict(), # For avoiding warmup bumps
                         'best_mAP': best_mAP
                     }, "yolov3_general_checkpoint_best.pth")
                     print(f"[I] Full checkpoint saved with mAP: {best_mAP:.4f}")
@@ -775,9 +711,9 @@ def main():
                     print(f"[W] Early stopping triggered after {patience} epochs without improvement.")
                     break
 
-            # =================================================================
-            # Enhanced 3x3 prediction visualization every x epochs for 416x416!
-            # =================================================================
+            # ================================================================
+            # Enhanced 3x3 prediction visualization every x epochs for 416x416
+            # ================================================================
             if (epoch + 1) % 100 == 0:
                 print(f"[I] Visualizing enhanced 3x3 predictions after epoch {epoch + 1}...")
 
@@ -823,9 +759,6 @@ def main():
                 anchor_colors = ["r", "g", "b"]
 
                 image_np = images[0].permute(1, 2, 0).cpu().numpy()
-                
-                # Not used (drawing in 416x416)
-                # orig_h, orig_w = original_sizes[0]  # Tuple: (H, W) from dataset
                 
                 # Not used, but kept for reference
                 scale_x = 416.0 / orig_w 
@@ -983,7 +916,6 @@ def main():
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
-                # 'scaler_state_dict': scaler.state_dict(), # For avoiding warm-up bumps
                 'best_mAP': best_mAP
             }, "yolov3_general_checkpoint_last.pth")
             print("[I] SAVE: Final checkpoint saved after training.")
@@ -1018,6 +950,7 @@ def main():
     ])
 
     # Light photometric augmentation
+    # Double color augmentation (ColorJitter) if applied, since data_loader.py already handles this (HSV)
     train_transform = transforms.Compose([
         transforms.ToPILImage(),  # Convert the NumPy arrays into PIL images
         transforms.Resize((416, 416), interpolation=Image.BILINEAR),  # Resize the image directly to 416x416
@@ -1026,12 +959,12 @@ def main():
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # Normalize
     ])
 
-    # Geometric augmentations (flipping, etc.) change the pixels, thus the bboxes must be aligned accordingly (handled in data_loader.py) - 2nd stage
+    # Geometric augmentations (flipping, etc.) change the pixels, thus the bboxes must be aligned accordingly (handled in data_loader.py)
     
     train_dataset = COCO_Dataset(
         image_dir=train_image_dir, 
         annotation_file=train_annotations_file, 
-        transform=train_transform,
+        transform=val_transform,
         subset_size=None,  # Set to "1" for memorizing one image (zebra overfit test)
         fixed_image_id=None # Use the fixed image ID to ensure the same image is used for training and validation (zebra overfit test)
     )
@@ -1062,7 +995,6 @@ def main():
     coco_category_ids = list(train_dataset.coco_id_to_model_index.keys())
 
     # Hardcode or set dynamically the number of classes
-    # Watch out for the dynamically generated number of classes (it might return more than 80 classes - 91)
     num_classes = 80 # dynamic version: len(coco_category_ids)
 
     # Extract mapping
@@ -1148,7 +1080,6 @@ def main():
         scale = ["small", "medium", "large"][i // 3]
         logger.info(f"[I] Anchor {i} → Scale: {scale}, Size: ({aw} × {ah})")
 
-    
     # Keep it only if you are explicitly starting from a clean slate (e.g. new experiment) or wrap it:
     if not os.path.exists(checkpoint_best_path) and not os.path.exists(checkpoint_last_path):
         model.apply(reset_weights)
@@ -1164,24 +1095,18 @@ def main():
     # START
 
     """
-
     Examples:
 
-    # Updates the weights of the model during training using an adaptive learning rate (lr = 0.0001) - good for object detection
+    # Updates the weights of the model during training using an adaptive LR (lr = 0.0001) - good for object detection
     optimizer = Adam(model.parameters(), lr=1e-4) # lr=1e-3, weight_decay=5e-4 or 0.0
 
-    # Reduces the learning rate every 10 epochs, multiplies lr by 0.1 at each step (0.0001 -> 0.00001 -> etc.) - good for fine-tuning 
+    # Reduces the LR every 10 epochs, multiplies lr by 0.1 at each step (0.0001 -> 0.00001 -> etc.) - good for fine-tuning 
     # e.g. scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.1, patience=10)
     """
    
     # Adam is a type of gradient descent (like SGD) with adaptive learning rate (based on past squared gradients), helps faster convergence.
     # optimizer = Adam(model.parameters(), lr=1e-3)
-    
-    # LR until epoch 145 (was dynamic due to the OneCycle)
-    # optimizer = Adam(model.parameters(), lr=5e-5)
 
-    # Constant LR after epoch 145 for fine-tuning, but REMEMBER that the model was stored with the old OneCycle LR
-    # Override the LR manually when loading from checkpoint
     optimizer = Adam(model.parameters(), lr=3e-4)
 
     # Manual switch to turn OneCycle on / off
@@ -1202,7 +1127,7 @@ def main():
     )
     """
 
-    # Makes computations faster and reduce GPU memory usage (mixed precision training) BUT fragile
+    # Makes computations faster and reduce GPU memory usage (mixed precision training), but fragile (not applied anymore)
     # scaler = torch.amp.GradScaler() 
     
     # Defining LR
@@ -1253,14 +1178,6 @@ def main():
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         
-        # For fine-tuning after epoch 145
-        # Override the LR manually when loading from a checkpoint (REMEMBER, the model at epoch 145 was saved with OneCycle)
-        # for g in optimizer.param_groups:
-        #    g["lr"] = 2e-5
-
-        # scaler.load_state_dict(checkpoint["scaler_state_dict"])
-        # scheduler.load_state_dict(checkpoint['scheduler_state_dict']) # scheduler is loaded after defining it - see below
-
         manual_loaded = True # Prevent reloading below
         print(f"[I] Loaded from checkpoint: epoch {start_epoch}, best mAP (logged so far): {best_mAP:.4f}")
       
@@ -1285,20 +1202,7 @@ def main():
             checkpoint = torch.load(checkpoint_path, weights_only=False)
             model.load_state_dict(checkpoint['model_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-
-            # For fine-tuning after epoch 145
-            # Override the LR manually when loading from a checkpoint (REMEMBER, the model at epoch 145 was saved with OneCycle)
-            # for g in optimizer.param_groups:
-            #    g["lr"] = 2e-5
-
-            # scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            """
-            if 'scaler_state_dict' in checkpoint:
-                scaler.load_state_dict(checkpoint['scaler_state_dict'])
-                print("[I] Loaded GradScaler state from checkpoint.")
-            else:
-                print("[W] No scaler_state_dict in checkpoint — starting scaler fresh.")
-            """                
+              
             start_epoch = checkpoint.get('epoch', 0)
             best_mAP = checkpoint.get('best_mAP', 0.0)
             print(f"[I] Loaded from checkpoint: epoch {start_epoch}, best mAP (logged so far): {best_mAP:.4f}")
@@ -1318,6 +1222,7 @@ def main():
     remaining_epochs = num_epochs - start_epoch
     total_steps = steps_per_epoch * remaining_epochs
     
+    # The original one
     """
     scheduler = OneCycleLR(
         optimizer,
@@ -1343,7 +1248,7 @@ def main():
         scheduler = None
     
     # The scheduler for OneCycle is planned for the predefined training run.
-    # If manual resume is needed, scheduler is loaded from checkpoint (OneCycle restarts for a new traing run intentionally).
+    # If manual resume is needed, scheduler is loaded from checkpoint.
     if force_manual_resume and os.path.exists(manual_ckpt_path) and use_scheduler:
         if "scheduler_state_dict" in checkpoint:
             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
@@ -1483,8 +1388,7 @@ def main():
     loss_history, memory_usage_history, cuda_memory_history, iou_history = train(model=model,
         train_dataloader=train_dataloader,
         optimizer=optimizer,
-        scheduler=scheduler,               
-        # scaler=scaler,                     
+        scheduler=scheduler,                              
         device=device,
         num_epochs=num_epochs,
         accumulation_steps=accumulation_steps,
@@ -1535,6 +1439,6 @@ def main():
     plt.grid(True)
     plt.show()
 
-# Wrapped into def main() to be able to use num_workers & pin_memory (except the data loader and preprocessing functions)
+# Wrapped into def main()
 if __name__ == "__main__":
     main()

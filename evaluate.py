@@ -80,12 +80,7 @@ def evaluate_model(model, data_loader, device, coco_gt_path, output_json_path, c
         
             # Safety check
             assert len(raw_outputs) == 3, f"[E] Model returned {len(raw_outputs)} scales. Expected 3."
-            """
-            batch_image_ids = dataset.image_ids[
-                batch_idx * data_loader.batch_size:
-                batch_idx * data_loader.batch_size + len(images)
-            ]
-            """
+ 
             batch_image_dims = [dataset.coco.imgs[image_id] for image_id in batch_image_ids]
 
             logger.info(f"[I] Eval batch {batch_idx}: image_ids = {batch_image_ids}")
@@ -123,10 +118,7 @@ def evaluate_model(model, data_loader, device, coco_gt_path, output_json_path, c
                 decoded = model.decode_predictions(
                     scales,
                     anchors = scaled_anchors,
-                    # anchors = model.anchors,
                     num_classes=model.num_classes,
-                    # image_w=image_w,
-                    # image_h=image_h,
                     image_w=416,
                     image_h=416,
                     nms_threshold=0.5,
@@ -180,11 +172,6 @@ def evaluate_model(model, data_loader, device, coco_gt_path, output_json_path, c
 
                 logger.info(f"[EVAL] High-conf boxes: {high_conf.sum().item()}, "
                             f"mean IoU={high_conf_ious.mean().item() if high_conf_ious.numel()>0 else 0:.3f}")
-                """
-                print(f"[EVAL] High-conf boxes: {high_conf.sum().item()}, "
-                            f"mean IoU={high_conf_ious.mean().item() if high_conf_ious.numel()>0 else 0:.3f}")
-                """
-
 
                 if gt_tensor is not None:
                     if pred_boxes.numel() > 0:
@@ -197,12 +184,6 @@ def evaluate_model(model, data_loader, device, coco_gt_path, output_json_path, c
                             gt_class_id = dataset.coco_id_to_model_index[annotations[gt_idx.item()]['category_id']]
                             logger.info(f"           -> GT class: {gt_class_id}, Pred class: {pred_labels[j].item()}, Match={'YES' if gt_class_id==pred_labels[j].item() else 'NO'}")
                 
-                """
-                if not isinstance(decoded, list) or not all(isinstance(d, dict) for d in decoded):
-                    logger.error(f"[E] decode_predictions returned an unexpected type: {type(decoded)}")
-                    raise TypeError("[E] decode_predictions must return a list of dictionaries.")
-                """
-
                 if not isinstance(decoded, dict):
                     logger.error(f"[E] decode_predictions returned unexpected type: {type(decoded)}")
                     raise TypeError("[E] decode_predictions must return a dict after indexing [0].")
@@ -254,9 +235,6 @@ def evaluate_model(model, data_loader, device, coco_gt_path, output_json_path, c
                         x_max /= scale_x
                         y_max /= scale_y
                         """
-                        # orig_h, orig_w = original_sizes[i]
-                        
-                        # gt_tensor = torch.tensor([[x_min, y_min, x_max, y_max]], device=device)
 
                         pred_boxes = decoded["boxes"]
                         if len(pred_boxes) > 0:

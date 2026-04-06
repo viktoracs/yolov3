@@ -186,7 +186,7 @@ class YOLOv3(nn.Module):
     """
     This function processes the model's outputs. Why necessary?
     
-    The raw outputs of the YOLO model contain grid-level predictions that need to be transformed into interpretable bboxes, conf.scores and class probs.
+    The raw outputs of the YOLO model contain grid-level predictions that need to be transformed into interpretable bboxes, obj.scores and class probs.
     
     This includes:
             -> Applying sigmoid to normalize the offsets and probabilities.
@@ -283,7 +283,7 @@ class YOLOv3(nn.Module):
             
             output = output.view(batch_size, grid_h, grid_w, num_anchors, num_classes + 5) 
             
-            # FIX THIS: absolute_anchors is a wrong name. decode_predictions() is only called with scaled_anchors (both from train.py and evaluate.py)
+            # IMPROVE THIS: absolute_anchors is a wrong name. decode_predictions() is only called with scaled_anchors (both from train.py and evaluate.py)
             absolute_anchors = anchor_groups[scale_idx] 
             anchor_w = torch.tensor([a[0] for a in absolute_anchors], device=output.device).view(1, 1, 1, num_anchors)
             anchor_h = torch.tensor([a[1] for a in absolute_anchors], device=output.device).view(1, 1, 1, num_anchors)
@@ -305,11 +305,11 @@ class YOLOv3(nn.Module):
             box_y = (torch.sigmoid(output[..., 1]) + grid_y) * stride
 
             # Even with a trained model, torch.exp(tw) and torch.exp(th) can explode (clamping helpes convergence, but makes it slower).
-            # Why 4.0? Because exp(4.0) ≈ 54.6, meaning the predicted box can be up to ~54.6× the anchor size and exp(-4.0) ≈ 0.018, meaning the predicted box can be as small as ~1.8% of the anchor size (plus, sigmoid funcion is basically flat outside ±4.0).
-            # Aligned with YOLO_loss.py clamping for consistency (hard clamping)
-            # Introdcued 2.0 instead of 4.0 for numerical stability.
-            tw = output[..., 2].clamp(min=-2.0, max=2.0)
-            th = output[..., 3].clamp(min=-2.0, max=2.0)
+            # 6.0 is good enough. Why? Because e.g. exp(4.0) ≈ 54.6, meaning the predicted box can be up to ~54.6× the anchor size already + the sigmoid funcion is basically flat outside ±4.0).
+            # Aligned with yolo_loss.py (hard clamping)
+            LOG_WH_CLAMP = 6.0
+            tw = output[..., 2].clamp(min=-LOG_WH_CLAMP, max=LOG_WH_CLAMP)
+            th = output[..., 3].clamp(min=-LOG_WH_CLAMP, max=LOG_WH_CLAMP)
 
             logger.info(f"[I] tw/th debug - tw min={tw.min():.2f}, max={tw.max():.2f}")
             logger.info(f"[I] tw/th debug - th min={th.min():.2f}, max={th.max():.2f}")
@@ -319,7 +319,7 @@ class YOLOv3(nn.Module):
             box_h = torch.exp(th) * anchor_h * stride
 
             # Optional clamping to ensure box sizes are within image dimensions
-            # This is fragile, since train.py's 416x416 call is fine, but with evaluate.py's original w and h call there will be a systematic box drift.
+            # This is fragile (needs refactoring), since train.py's 416x416 call is fine, but with evaluate.py's original w and h call there will be a systematic box drift.
             # Example: if x_max below is 420 (since box_w is calculated based on scaled_anchors - 416x416 pixel-space), then it won't be clamped by the original image size.
             # Scaling 420 further causes box drift in evaluate.py (rule: scale first, clamp after).
             box_w = box_w.clamp(0, image_w)
@@ -340,9 +340,8 @@ class YOLOv3(nn.Module):
             y_max = y_max.clamp(0, image_h)
 
             # Always rescale predicted boxes from 416×416 model space back to the original image size. 
-            # MOVE TO EVALUATE.PY (this is fragile), decode_predictions() is called from train.py (with 416x416) + evaluate.py (with original image size)
-            # Scaling predicted boxes to match the original image size (if not 416×416), applied only for the evaluate.py call 
-            # NOW this is fully handled in evaluate.py, so that this part is never called. Can be removed.
+            # Needs refactoring. Now this is fully handled in evaluate.py. This part is never called. Can be removed.
+            # decode_predictions() is now called consistently both from train.py and evaluate.py
             if image_w != 416 or image_h != 416:               
                 scale_x = image_w / 416
                 scale_y = image_h / 416
