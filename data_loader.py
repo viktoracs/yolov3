@@ -92,8 +92,9 @@ class COCO_Dataset(Dataset):
         # Convert to NumPy arrays
         boxes = np.array(boxes, dtype=np.float32)
         labels = np.array(labels, dtype=np.int64)
-
+        
         # Extended augmentations
+        # Always comment out the augmentation part here before doing an eval (otherwise the val data will be augmented as well -> much lower mAP scores)
         if boxes.shape[0] > 0:
             
             # 1: Random horizontal flip (geometrical)
@@ -126,7 +127,7 @@ class COCO_Dataset(Dataset):
 
                 # Convert back HSV -> RGB
                 image = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
-                
+        
         # Apply transformations
         if self.transform:
 
