@@ -106,8 +106,8 @@ preds = model.decode_predictions(
     # image_h=orig_h,
     image_w = 416,
     image_h = 416,
-    conf_threshold=0.6,
-    nms_threshold=0.4,
+    conf_threshold=0.75,
+    nms_threshold=0.25,
     debug_force_class=None
 )
 
