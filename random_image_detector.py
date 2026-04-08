@@ -55,6 +55,18 @@ anchors = [
     [351.54059713, 159.67305114], [224.41982096, 331.08204223], [381.16142647, 359.7244103]
 ]
 
+# Small (52x52) -> Stride 8, Medium (26x26) -> Stride 16, Large (13x13) -> Stride 32
+strides = [8, 16, 32]  
+
+
+# scaled_anchors are provided in grid units
+scaled_anchors = [
+    (w / strides[0], h / strides[0]) for w, h in anchors[:3]   # Small scale (52x52)
+    ] + [
+        (w / strides[1], h / strides[1]) for w, h in anchors[3:6]  # Medium scale (26x26)
+    ] + [
+        (w / strides[2], h / strides[2]) for w, h in anchors[6:]   # Large scale (13x13)
+    ]
 
 # Build model
 model = YOLOv3(num_classes=num_classes, anchors=anchors)
@@ -88,14 +100,14 @@ with torch.no_grad():
 # Decode predictions
 preds = model.decode_predictions(
     outputs,
-    anchors=model.anchors,
+    anchors=scaled_anchors,
     num_classes=num_classes,
     # image_w=orig_w,
     # image_h=orig_h,
     image_w = 416,
     image_h = 416,
     conf_threshold=0.6,
-    nms_threshold=0.25,
+    nms_threshold=0.4,
     debug_force_class=None
 )
 
