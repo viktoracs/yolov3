@@ -73,7 +73,7 @@ model = YOLOv3(num_classes=num_classes, anchors=anchors)
 model.load_state_dict(checkpoint["model_state_dict"])
 model.to("cuda").eval()
 
-# Only look for image files 
+# Only look for image files (no folders)
 valid_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 image_files = [
