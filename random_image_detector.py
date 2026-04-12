@@ -73,14 +73,28 @@ model = YOLOv3(num_classes=num_classes, anchors=anchors)
 model.load_state_dict(checkpoint["model_state_dict"])
 model.to("cuda").eval()
 
-# Pick random image
-image_files = os.listdir(image_dir)
+# Only look for image files 
+valid_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+
+image_files = [
+    f for f in os.listdir(image_dir)
+    if os.path.isfile(os.path.join(image_dir, f))
+    and os.path.splitext(f.lower())[1] in valid_exts
+]
+
+if not image_files:
+    raise RuntimeError(f"No valid image files found in {image_dir}")
+
+# Pick a random image
 random_file = random.choice(image_files)
 image_path = os.path.join(image_dir, random_file)
 print(f"[I] Running inference on {image_path}")
 
 # Load and preprocess image (keep original size for drawing later)
 orig_img = cv2.imread(image_path)
+if orig_img is None:
+    raise RuntimeError(f"OpenCV could not read image: {image_path}")
+
 orig_h, orig_w = orig_img.shape[:2]
 
 # Preprocess for YOLO 416x416
@@ -106,8 +120,8 @@ preds = model.decode_predictions(
     # image_h=orig_h,
     image_w = 416,
     image_h = 416,
-    conf_threshold=0.75,
-    nms_threshold=0.25,
+    conf_threshold=0.95,
+    nms_threshold=0.1,
     debug_force_class=None
 )
 
