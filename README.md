@@ -9,9 +9,9 @@
 ### Trained on NVIDIA GeForce RTX 4070 Ti.
 
 ### mAP score achieved:
-- **mAP@[0.5:0.95]: 0.1262**
-- **AP50: 0.273**
-- **AP75: 0.101**
+- **mAP@[0.5:0.95]: 0.1275**
+- **AP50: 0.271**
+- **AP75: 0.105**
 
 This result was obtained with:
 - Fixed input size: 416x416
