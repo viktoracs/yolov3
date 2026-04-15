@@ -25,7 +25,8 @@ This result was obtained with:
 ### random_image_detector.py:
 
 	Please start this script from the same folder where the model and project's .py files are.
-	It can handle any image resolutions and most common image extensions (uses OpenCV). It takes the test image from the hardcoded folders. If there are multiple images, the selection is random.
+	It can handle any image resolutions and accepts the following extensions: .jpg, .jpeg, .png, .bmp, .webp 
+	It takes the test image from the hardcoded folders. If there are multiple images, the selection is random.
 
 	# For COCO val images
 	image_dir = r"C:\Users\viktor.acs\Downloads\coco_dataset\val2017"
