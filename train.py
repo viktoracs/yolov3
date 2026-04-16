@@ -38,6 +38,7 @@ from logger import logger
 | Ignore mask to overlapping anchors
 | FP32 instead of FP16 for numerical stability (deleted AMP)
 | Correct class normalization (/num_pos_class, removed /batch_size = double normalization)
+| New LR and training dynamics: ResNet50 + Adam + OneCycle + fixed-416 
 """
 
 # ======
@@ -344,7 +345,7 @@ def main():
     # ===================================
 
     # num_epochs = the actual epoch where we are (additional_epochs = how much more to train)
-    num_epochs = 100
+    num_epochs = 77
     accumulation_steps = 1
 
     checkpoint_best_path = os.path.join(os.getcwd(), "yolov3_general_checkpoint_best.pth")
@@ -1158,10 +1159,10 @@ def main():
     start_epoch = 0
     best_mAP = 0.0
 
-    additional_epochs = 0
+    additional_epochs = 23
 
     # Manual checkpoint control
-    force_manual_resume = False # Set True only when want to resume from a manually fixed checkpoint
+    force_manual_resume = True # Set True only when want to resume from a manually fixed checkpoint
     manual_ckpt_path = os.path.join(os.getcwd(), "yolov3_checkpoint_last_epoch.pth")
 
     # Manual switch (Option 1 will switch it anyway)
