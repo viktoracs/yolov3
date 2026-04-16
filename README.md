@@ -17,8 +17,8 @@ This result was obtained with:
 - Fixed input size: 416x416
 - Optimizer: Adam
 - Scheduler: OneCycleLR
-- Highest score achieved at epoch 60 (planned for 100 epochs) 
-- Simple augmentation (horizontal flip, hue, saturation, brightness)
+- Epochs: 100
+- Simple augmentations (horizontal flip, hue, saturation, brightness)
  
 ### Executable files
 
