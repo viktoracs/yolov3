@@ -9,15 +9,17 @@
 ### Trained on NVIDIA GeForce RTX 4070 Ti.
 
 ### mAP score achieved:
-- **mAP@[0.5:0.95]: 0.1275**
-- **AP50: 0.271**
-- **AP75: 0.105**
+- **mAP@[0.5:0.95]: 0.2237**
+- **AP50: 0.406**
+- **AP75: 0.222**
 
 This result was obtained with:
 - Fixed input size: 416x416
 - Optimizer: Adam
-- Scheduler: OneCycleLR
-- Epochs: 100
+- Base learning rate: 1e-4
+- LR schedule: 2-epoch linear warmup followed by cosine annealing
+- Minimum LR: 1e-6
+- Duration: 50 epochs
 - Simple augmentations (horizontal flip, hue, saturation, brightness)
  
 ### Executable files
@@ -39,8 +41,8 @@ This result was obtained with:
 	You can set the NMS and the confidence threshold in the "decode_predictions" function manually:
 	preds = model.decode_predictions(
 	    ...
-	    conf_threshold=0.75,
-	    nms_threshold=0.25,
+	    conf_threshold=0.55,
+	    nms_threshold=0.45,
 	    ...
 
 ### debug_visualizer_lossmaps_updated.py:
@@ -69,7 +71,3 @@ This result was obtained with:
 	Please start this script from the same folder where the model and project's .py files are.
 	There are no additional parameters, just simply run: python k_means_anchor_calculator.py
 	It calculates the k-means anchors for the pipeline.
-
-### Limitations:
-- Performance remains below stronger reference YOLOv3 implementations
-- Ranking/calibration is weaker than ideal
