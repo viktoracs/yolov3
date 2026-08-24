@@ -57,7 +57,7 @@ This result was obtained with:
 	Please start this script from the same folder where the model and project's .py files are.	
 	There are no additional parameters, just simply run: python eval_without_train.py 
 	It runs evaluation without training.
-	Note: Please comment out the extended augmentations part (# Extended augmentations) in data_loader.py to get valid (non-augmented) mAP scores.
+	Note: Augmentation is controlled by the augment flag (training (augment=True) / validation & standalone evaluation (augment=False))
 
 ### train.py:
 
