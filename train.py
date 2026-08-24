@@ -15,31 +15,24 @@ from sklearn.cluster import KMeans
 from PIL import Image
 from torch.utils.data import DataLoader
 from torch.optim import Adam
+from torchvision.ops import box_iou
 from torchvision import transforms
-from torch.optim.lr_scheduler import OneCycleLR
+from torch.optim.lr_scheduler import (
+    LinearLR, 
+    CosineAnnealingLR, 
+    SequentialLR
+)
 from YOLO_with_ResNet50 import YOLOv3
 from data_loader import COCO_Dataset
-from yolo_loss import yolo_loss
 from evaluate import run_evaluation_after_training
+from yolo_loss import (
+    yolo_loss, 
+    xywh_to_xyxy, 
+    box_iou_xyxy
+)
 from helper import compute_iou, generate_yolo_targets_global
 from logger import logger
 
-# Latest fixes and improvements:
-"""
-| Component                              
-| ---------------------------
-| K-means anchors
-| Corner–center bug fix (target generator)
-| tw/th clamping
-| YOLO-style biases
-| FPN (P3/P4/P5)
-| Center loss (x,y) in pixel space
-| Stable loss weights
-| Ignore mask to overlapping anchors
-| FP32 instead of FP16 for numerical stability (deleted AMP)
-| Correct class normalization (/num_pos_class, removed /batch_size = double normalization)
-| New LR and training dynamics: ResNet50 + Adam + OneCycle + fixed-416 
-"""
 
 # ======
 # INTRO:
@@ -51,8 +44,9 @@ from logger import logger
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", message="expandable_segments not supported")
 
-# Helper (directly in the "yolov3_env" terminal after typing "python")
-# Forces the epoch number manually if needed (after a crash).
+# Helper tools (use directly in the "yolov3_env" terminal after typing "python")
+
+# Forces the epoch number manually if needed.
 """
 import torch
 ckpt = torch.load("yolov3_checkpoint_last_epoch.pth", map_location="cpu")
@@ -69,14 +63,8 @@ print(ckpt.keys())
 print("Epoch:", ckpt.get('epoch'))
 """
 
-# Regarding the benchmarking: COCO-style mAP@[0.5:0.95] is much stricter than mAP@[0.5] (aka Pascal VOC style)
-# Differences:
-# Pascal VOC metric (mAP@[0.5]) - 20 classes, IoU threshold fixed at 0.5
-# COCO metric (mAP@[0.5:0.95]) - 80 classes, IoU thresholds from 0.5 to 0.95 in increments of 0.05 (10 thresholds total)
-
 # This makes cuDNN auto-select the fastest kernels for the fixed input size (416×416). Only safe if the input resolution is constant.
 cudnn.benchmark = True
-
 
 # ==============
 # CURRENT SETUP:
@@ -86,31 +74,22 @@ cudnn.benchmark = True
 -> subset_size = None
 -> num_epochs = the actual starting point
 -> validation interval = every x epochs
--> batch_size = 32
+-> batch_size = 8
 -> accumulation_steps = 1
 
 Initial default loss weights:
 lambda_box = 5.0
-lambda_obj = 2.0
+lambda_obj = 1.0
 lambda_noobj = 1.0 
 lambda_cls = 1.0   
 
-Optimizer = Adam(model.parameters(), lr=1e-3) - Why? 
-
-Because of the "zebra" overfit results (sanity test before going for full training):
-
-    Zebra Overfit 3 models:
-    -> Old LR, with uneven loss curve - mAP 0.9, high confidence score
-    -> New LR 1e-4 with very smooth loss curve - mAP 0.8, lower confidence score
-    -> New LR 1e-3 with more even loss curve - mAP 0.9, higher confidence score (selected for the first full training):
-
-    LR:
-    Notation    Decimal Equivalent	    Description
-    1e-1	    0.1	                    Large LR (often too aggressive)
-    1e-2	    0.01	                Still relatively large
-    1e-3	    0.001	                Standard for many deep learning setups (like the current config)
-    1e-4	    0.0001	                Smaller (slower but safer convergence)
-    1e-5	    0.00001	                Very small (often used for fine-tuning)
+LR:
+Notation    Decimal Equivalent	    Description
+1e-1	    0.1	                    Large LR (often too aggressive)
+1e-2	    0.01	                Still relatively large
+1e-3	    0.001	                Standard for many deep learning setups
+1e-4	    0.0001	                Smaller (slower but safer convergence)
+1e-5	    0.00001	                Very small (often used for fine-tuning)
 
 """
 
@@ -205,7 +184,7 @@ def collate_fn(batch):
 
     # Convert labels to tensors
     # label.clone() - deep copy: prevents modifications to the original label
-    # detach() - detaches the tensor from the current computation graph (no gradient tracking)
+    # detach() - detaches the tensor from the current computation graph (doesn’t track gradients)
     # long() - casts the tensor to torch.int64, the standard dtype for class labels in PyTorch
     processed_labels = [label.clone().detach().long() for label in labels]
     
@@ -215,7 +194,7 @@ def collate_fn(batch):
     # Padding logic
     max_boxes = max(box.shape[0] for box in boxes) # Finds the maximum number of bounding boxes across all images in the batch
     padded_boxes = torch.zeros((len(boxes), max_boxes, 4), dtype=torch.float32) # Creates a zero-filled tensor to hold all bounding boxes
-    padded_labels = torch.full((len(labels), max_boxes), fill_value=-1, dtype=torch.long) # Creates a tensor filled with -1 to hold class labels (Why? Person is class 0, so -1 indicates padded values)
+    padded_labels = torch.full((len(labels), max_boxes), fill_value=-1, dtype=torch.long) # Creates a tensor filled with -1 to hold class labels (Why? Person is class 0, so -1 indicates padded values.)
 
     for i in range(len(boxes)):
         if boxes[i].shape[0] > 0:
@@ -226,7 +205,7 @@ def collate_fn(batch):
 
     return images, padded_boxes, padded_labels, fixed_original_sizes, image_ids
     
-# Normalize GT bboxes
+# Normalize GT bboxes (0-1)
 def normalize_boxes(boxes, image_width, image_height):
     """
     Normalizes GT bboxes relative to the image dimensions.
@@ -262,14 +241,6 @@ def normalize_boxes(boxes, image_width, image_height):
 
 def main():
 
-    # Enables expandable segments (reduces fragmentation). Added as environment variable but it doesn't work on Windows. Prevents GPU OOM.
-    """
-    print("[I] PYTORCH_CUDA_ALLOC_CONF =", os.environ.get("PYTORCH_CUDA_ALLOC_CONF"))
-    
-    # Apply these to surpress warnings if used on Windows:
-    warnings.filterwarnings("ignore", category=FutureWarning)
-    warnings.filterwarnings("ignore", message="expandable_segments not supported")
-    """
     # ==============
     # Path settings:
     # ==============
@@ -284,7 +255,7 @@ def main():
     train_annotations_file = os.path.join(coco_data_dir, 'annotations', 'instances_train2017.json')
     train_image_dir = os.path.join(coco_data_dir, 'train2017')
 
-    # Validation dataset and DataLoader. 
+    # Validation dataset and DataLoader
     # For overfitting on one image, comment these two lines:
     val_annotations_file = os.path.join(coco_data_dir, 'annotations', 'instances_val2017.json')
     val_image_dir = os.path.join(coco_data_dir, 'val2017')
@@ -297,8 +268,8 @@ def main():
     # Anchors:
     # ========
 
-    # Default anchors for YOLOv3 (based on the study): 1. width, 2. height
     """
+    # Default anchors for YOLOv3 (based on the study): 1. width, 2. height
     anchors = [
         [10, 13], [16, 30], [33, 23],  # Small-scale objects
         [30, 61], [62, 45], [59, 119], # Medium-scale objects
@@ -313,7 +284,7 @@ def main():
     ]
 
     # =============================
-    # Model checkpointing strategy:
+    # Model checkpointing strategy: 
     # =============================
     #
     # 1. "Best" checkpoint -> yolov3_general_checkpoint_best.pth
@@ -321,11 +292,11 @@ def main():
     #    - Used as the preferred checkpoint to resume training by default.
     #
     # 2. "Last" checkpoint -> yolov3_general_checkpoint_last.pth
-    #    - Saved at the "end of training", regardless of performance.
+    #    - Saved at the "end of training" (regardless of performance).
     #    - Used as a fallback if no "best" checkpoint exists.
     #
     # 3. "Last epoch" checkpoint -> yolov3_checkpoint_last_epoch.pth
-    #    - Saves the training state after every epoch (to have a fallback to continue from -> manual resume).
+    #    - Saves the training state after every epoch.
     #
     # =========================================================
     # Loading strategy before training (without manual resume):
@@ -345,7 +316,7 @@ def main():
     # ===================================
 
     # num_epochs = the actual epoch where we are (additional_epochs = how much more to train)
-    num_epochs = 77
+    num_epochs = 27
     accumulation_steps = 1
 
     checkpoint_best_path = os.path.join(os.getcwd(), "yolov3_general_checkpoint_best.pth")
@@ -433,7 +404,7 @@ def main():
                 # boxes: (B, N, 4) in absolute 416×416 pixel space
                 # labels: (B, N)
 
-                # The normalize_boxes() function was designed for this part. Needs refactoring.
+                # The normalize_boxes() function was designed for this part. NEEDS REFACTORING.
                 # Convert xy xy -> normalized cx cy wh for each image in batch
                 B, N, _ = boxes.shape
                 normalized_boxes = torch.zeros((B, N, 4), device=boxes.device)
@@ -478,7 +449,7 @@ def main():
                     assert not torch.isnan(target).any(), f"[E] NaN detected in {name} target tensor!"
                     assert not torch.isinf(target).any(), f"[E] Inf detected in {name} target tensor!"
 
-                # HARD STOP if input is bad (catches NaNs coming from dataset/augmentations)
+                # HARD STOP if input is bad (this catches NaNs coming from dataset/augmentations)
                 if not torch.isfinite(images).all():
                     bad = (~torch.isfinite(images)).sum().item()
                     print(f"[E] Non-finite values in IMAGES: count={bad}")
@@ -496,7 +467,7 @@ def main():
 
                 outputs = model(images)
 
-                # HARD STOP if forward pass is bad (this catches model/AMP/BN blow-ups)
+                # HARD STOP if forward pass is bad (this catches model blow-ups)
                 if isinstance(outputs, (list, tuple)):
                     for i, out in enumerate(outputs):
                         if not torch.isfinite(out).all():
@@ -580,13 +551,6 @@ def main():
                             logger.info(f"[I] Matched GT anchors found at scale {scale_name}")
                             obj_at_gt = pred_conf[gt_mask]
                             logger.info(f"[I] GT objectness min: {obj_at_gt.min():.4f}, max: {obj_at_gt.max():.4f}, mean: {obj_at_gt.mean():.4f}")
-
-                            # Legacy code: Zebra overfit check
-                            # gt_class_logits = pred_cls[gt_mask]
-                            # gt_class_probs = torch.sigmoid(gt_class_logits) # Convert logits to probabilities
-                            # zebra_probs = gt_class_probs[:, 22] 
-                            # print(f"[GT Zebra Probs] min: {zebra_probs.min():.4f}, max: {zebra_probs.max():.4f}, mean: {zebra_probs.mean():.4f}") # Zebra overfit check
-
                         else:
                             logger.info(f"[I] Scale {scale_name.upper()}] no GT anchors matched.")
 
@@ -611,14 +575,13 @@ def main():
 
                 if (step + 1) % accumulation_steps == 0 or (step + 1) == len(train_dataloader):
                                        
-                    # Training becomes smoother especially with OneCycle LR                
+                    # Training becomes smoother (no extreme gradient updates - avoid NaN)         
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
                     
                     optimizer.step()
-                    
+
                     # Only step scheduler if optimizer actually updated
                     if scheduler is not None:
-                        scheduler.step()
 
                         if step % 200 == 0:
                             print(f"[LR] epoch={epoch}, step={step}, "
@@ -643,7 +606,6 @@ def main():
                 else:
                     logger.warning("[W] Skipping non-finite batch loss for epoch average.")
 
-
                 # Record CPU memory usage
                 current, peak = tracemalloc.get_traced_memory()
                 memory_usage_history.append((current / 1024 / 1024, peak / 1024 / 1024))  # Convert to MB
@@ -658,13 +620,41 @@ def main():
             
             avg_epoch_loss = epoch_loss / max(1, num_batches)
             loss_history.append(avg_epoch_loss)
+
             relative_epoch = epoch - start_epoch + 1
             total_epochs = num_epochs - start_epoch
-            logger.info(f"[I] Epoch [{relative_epoch}/{total_epochs}], Average Epoch Loss: {avg_epoch_loss:.4f}")
-            print(f"[I] Epoch [{relative_epoch}/{total_epochs}], Average Epoch Loss: {avg_epoch_loss:.4f}")
 
-            # Append a placeholder for IoU so the plot has correct length even if not decoded every epoch
-            iou_history.append(None) 
+            logger.info(
+                f"[I] Epoch [{relative_epoch}/{total_epochs}], "
+                f"Average Epoch Loss: {avg_epoch_loss:.4f}"
+            )
+
+            print(
+                f"[I] Epoch [{relative_epoch}/{total_epochs}], "
+                f"Average Epoch Loss: {avg_epoch_loss:.4f}"
+            )
+
+            # ==========================================================
+            # Step warmup/cosine scheduler once per completed epoch
+            # ==========================================================
+            if scheduler is not None:
+                scheduler.step()
+
+                current_lr = optimizer.param_groups[0]["lr"]
+
+                logger.info(
+                    f"[LR] Completed epoch {epoch + 1}: "
+                    f"next LR = {current_lr:.8e}"
+                )
+
+                print(
+                    f"[LR] Completed epoch {epoch + 1}: "
+                    f"next LR = {current_lr:.8e}"
+                )
+
+            # Append a placeholder for IoU so the plot has correct length
+            iou_history.append(None)
+
 
             # ========== SAVE LAST CHECKPOINT (every epoch) ==========
             torch.save({
@@ -676,10 +666,12 @@ def main():
             }, "yolov3_checkpoint_last_epoch.pth")
             print(f"[I] Saved checkpoint for epoch {epoch+1} (last).")
     
+            # Basically unused due to eval_without_train.py (set to 100 for now)
             # ==========
             # VALIDATION
             # ==========
             # Validate after x epochs to save resources
+            
             if (epoch + 1) % 100 == 0:  
                 logger.info(f"[I] Epoch {epoch + 1} - Running validation...")
                 print(f"[I] Epoch {epoch + 1} - Running validation...")
@@ -712,9 +704,10 @@ def main():
                     print(f"[W] Early stopping triggered after {patience} epochs without improvement.")
                     break
 
-            # ================================================================
-            # Enhanced 3x3 prediction visualization every x epochs for 416x416
-            # ================================================================
+            # Basically unused due to random_image_detector.py - CAN BE REMOVED
+            # =================================================================
+            # Enhanced 3x3 prediction visualization every x epochs for 416x416! 
+            # =================================================================
             if (epoch + 1) % 100 == 0:
                 print(f"[I] Visualizing enhanced 3x3 predictions after epoch {epoch + 1}...")
 
@@ -760,6 +753,9 @@ def main():
                 anchor_colors = ["r", "g", "b"]
 
                 image_np = images[0].permute(1, 2, 0).cpu().numpy()
+                
+                # Not used (drawing in 416x416)
+                # orig_h, orig_w = original_sizes[0]  # Tuple: (H, W) from dataset
                 
                 # Not used, but kept for reference
                 scale_x = 416.0 / orig_w 
@@ -935,7 +931,7 @@ def main():
 
     # Define transformations for preprocessing (target generation)
     """
-    This pipeline:
+    The pipeline:
     1. Converts the image (and only the image) to a PIL format (GT boxes are scaled to 416x416 in the COCO_Dataset class).
     2. Resizes the image to maintain aspect ratio (shortest side = 416) and pads it to 416x416.
     3. Converts the image to a PyTorch tensor.
@@ -950,24 +946,24 @@ def main():
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # Normalize
     ])
 
-    # Light photometric augmentation
-    # Double color augmentation (ColorJitter) if applied, since data_loader.py already handles this (HSV)
+    # Light photometric augmentation - NOT APPLIED at the moment (only flipping and HSV handled in the dataloader.py)
     train_transform = transforms.Compose([
         transforms.ToPILImage(),  # Convert the NumPy arrays into PIL images
         transforms.Resize((416, 416), interpolation=Image.BILINEAR),  # Resize the image directly to 416x416
-        transforms.RandomApply([transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.0)], p=0.7),
+        transforms.RandomApply([transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.0)], p=0.7), 
         transforms.ToTensor(),  # Convert the image to tensor (C, H, W)
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # Normalize
     ])
 
-    # Geometric augmentations (flipping, etc.) change the pixels, thus the bboxes must be aligned accordingly (handled in data_loader.py)
-    
+    # REMEMBER: Geometric augmentations (flipping, rotating, cropping, etc.) change the pixels! Thus, the bboxes must be aligned accordingly (handled in data_loader.py).
+
     train_dataset = COCO_Dataset(
         image_dir=train_image_dir, 
         annotation_file=train_annotations_file, 
-        transform=val_transform,
+        transform=val_transform, # Don't apply color jitter for now
         subset_size=None,  # Set to "1" for memorizing one image (zebra overfit test)
-        fixed_image_id=None # Use the fixed image ID to ensure the same image is used for training and validation (zebra overfit test)
+        fixed_image_id=None, # Use the fixed image ID to ensure the same image is used for training and validation (zebra overfit test)
+        augment=True
     )
 
     # stride (in pixels) = 416 / grid_size
@@ -995,7 +991,7 @@ def main():
     # Extract COCO category IDs from the COCO_dataset instance
     coco_category_ids = list(train_dataset.coco_id_to_model_index.keys())
 
-    # Hardcode or set dynamically the number of classes
+    # Hardcode or set dynamically the number of classes. Watch out for the dynamically generated number of classes (it might return more than 80 classes - 91).
     num_classes = 80 # dynamic version: len(coco_category_ids)
 
     # Extract mapping
@@ -1028,7 +1024,7 @@ def main():
 
     train_dataloader = DataLoader(
         train_dataset, 
-        batch_size=32, 
+        batch_size=8, 
         shuffle=True, 
         collate_fn=collate_fn, 
         num_workers=6, # Check the benchmarking results down below
@@ -1036,7 +1032,7 @@ def main():
         persistent_workers=True # Small wins (The dataloader workers stay alive across epochs, so the startup overhead is gone. The effect is more visible for many short epochs.)
     )
 
-    # Legacy code: train_dataset.show_fixed_image_with_gt_bb() # Only for a single image (zebra overfit test)
+    # Legacy code: train_dataset.show_fixed_image_with_gt_bb() # Only for a single image (one class overfit test e.g. zebra)
 
     # Load validation dataset
     val_dataset = COCO_Dataset(
@@ -1044,12 +1040,13 @@ def main():
         annotation_file=val_annotations_file, 
         transform=val_transform,
         subset_size=None,  
-        fixed_image_id=None
+        fixed_image_id=None,
+        augment=False
     )
 
     val_dataloader = DataLoader(
         val_dataset, 
-        batch_size=32, 
+        batch_size=8, 
         shuffle=False, 
         collate_fn=collate_fn, 
         num_workers=6,
@@ -1066,9 +1063,9 @@ def main():
     model = YOLOv3(num_classes=num_classes, anchors=anchors)
 
     """
-    Anchor boxes must be carefully scaled to match the coordinate system of each stage in the pipeline:
+    Anchor boxes must be scaled to match the coordinate system of each stage in the pipeline:
 
-    Component                       | Expected Anchor Format                               | Reason
+    Component                       | Expected Anchor Format                               | Why?
     ------------------------        |------------------------------------                  |---------------------------------------------------------------------
     YOLOv3 model init               | Raw pixel anchors                                    | Used to initialize the head modules (not involved in matching logic).
     generate_yolo_targets_global()  | Grid-relative "scaled_anchors" (pixel / stride)      | GT boxes are in pixel units, but model predicts offsets in grid units.
@@ -1081,11 +1078,6 @@ def main():
         scale = ["small", "medium", "large"][i // 3]
         logger.info(f"[I] Anchor {i} → Scale: {scale}, Size: ({aw} × {ah})")
 
-    # Keep it only if you are explicitly starting from a clean slate (e.g. new experiment) or wrap it:
-    if not os.path.exists(checkpoint_best_path) and not os.path.exists(checkpoint_last_path):
-        model.apply(reset_weights)
-        print("[I] No checkpoints found — model weights were reset.")
-
     # Print the number of output channels in each detection head
     for name, param in model.named_parameters():
         if "det_head" in name and "weight" in name:
@@ -1096,40 +1088,17 @@ def main():
     # START
 
     """
-    Examples:
+    Example:
 
-    # Updates the weights of the model during training using an adaptive LR (lr = 0.0001) - good for object detection
+    # Updates the weights of the model during training using an adaptive learning rate (lr = 0.0001) - good for object detection
     optimizer = Adam(model.parameters(), lr=1e-4) # lr=1e-3, weight_decay=5e-4 or 0.0
-
-    # Reduces the LR every 10 epochs, multiplies lr by 0.1 at each step (0.0001 -> 0.00001 -> etc.) - good for fine-tuning 
-    # e.g. scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.1, patience=10)
     """
    
     # Adam is a type of gradient descent (like SGD) with adaptive learning rate (based on past squared gradients), helps faster convergence.
-    # optimizer = Adam(model.parameters(), lr=1e-3)
+    optimizer = Adam(model.parameters(), lr=1e-4)
 
-    optimizer = Adam(model.parameters(), lr=3e-4)
-
-    # Manual switch to turn OneCycle on / off
+    # Manual switch to turn the scheduler on / off
     use_scheduler = True
-    
-    """
-    steps_per_epoch = len(train_dataloader)
-    total_steps = steps_per_epoch * num_epochs
-
-    scheduler = OneCycleLR(
-        optimizer,
-        max_lr=1e-3,               
-        total_steps=total_steps,   # Required
-        pct_start=0.1,             # Warmup phase = 10% of training
-        anneal_strategy='cos',     # Cosine decay after warmup
-        div_factor=10.0,           # Initial LR = max_lr / div_factor
-        final_div_factor=100.0     # Final LR = max_lr / final_div_factor
-    )
-    """
-
-    # Makes computations faster and reduce GPU memory usage (mixed precision training), but fragile (not applied anymore)
-    # scaler = torch.amp.GradScaler() 
     
     # Defining LR
     # END
@@ -1155,6 +1124,7 @@ def main():
     # =============================
     # Load checkpoint (prefer best)
     # =============================
+    checkpoint = None
     checkpoint_path = None
     start_epoch = 0
     best_mAP = 0.0
@@ -1162,13 +1132,13 @@ def main():
     additional_epochs = 23
 
     # Manual checkpoint control
-    force_manual_resume = True # Set True only when want to resume from a manually fixed checkpoint
+    force_manual_resume = True # Set True only when want to resume from a saved checkpoint (training stopped for whatever reason)
     manual_ckpt_path = os.path.join(os.getcwd(), "yolov3_checkpoint_last_epoch.pth")
 
     # Manual switch (Option 1 will switch it anyway)
     manual_loaded = False
 
-    # Option 1: Force resume from manually fixed checkpoint (epoch counter restore - see the commands in the header) if "yolov3_checkpoint_last_epoch.pth" needs to be used due to training crash.
+    # Option 1: Resume from a saved checkpoint
     if force_manual_resume and os.path.exists(manual_ckpt_path):
         print(f"[I] Forcing resume from manually fixed checkpoint: {manual_ckpt_path}")
         checkpoint = torch.load(manual_ckpt_path, map_location="cuda" if torch.cuda.is_available() else "cpu", weights_only=False)
@@ -1177,8 +1147,19 @@ def main():
         best_mAP = checkpoint.get("best_mAP", 0.0)
 
         model.load_state_dict(checkpoint["model_state_dict"])
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         
+        """
+        # Used for a constant LR which makes the LR scheduler below unnecessary
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+        for g in optimizer.param_groups:
+            g["lr"] = 1e-6
+
+        print("[I] Resumed optimizer LR:", optimizer.param_groups[0]["lr"])
+        """
+        
+        print(f"[I] Loaded model checkpoint at completed epoch "f"{start_epoch}")
+
         manual_loaded = True # Prevent reloading below
         print(f"[I] Loaded from checkpoint: epoch {start_epoch}, best mAP (logged so far): {best_mAP:.4f}")
       
@@ -1203,7 +1184,7 @@ def main():
             checkpoint = torch.load(checkpoint_path, weights_only=False)
             model.load_state_dict(checkpoint['model_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-              
+             
             start_epoch = checkpoint.get('epoch', 0)
             best_mAP = checkpoint.get('best_mAP', 0.0)
             print(f"[I] Loaded from checkpoint: epoch {start_epoch}, best mAP (logged so far): {best_mAP:.4f}")
@@ -1213,50 +1194,77 @@ def main():
                 num_epochs = start_epoch + additional_epochs
                 print(f"[I] Resuming from epoch {start_epoch}. Updated num_epochs to {additional_epochs} for continued training.")
 
-    # ===============================================================
-    # CREATE OneCycleLR (always after optimizer and checkpoint load)
-    # ===============================================================
+    # ========================================================================
+    # LR scheduler for the current model: 2-epoch linear warmup + cosine decay
+    # ========================================================================
 
-    # steps_per_epoch = len(train_dataloader)
-    steps_per_epoch = (len(train_dataloader) + accumulation_steps - 1) // accumulation_steps
+    warmup_epochs = 2
 
-    remaining_epochs = num_epochs - start_epoch
-    total_steps = steps_per_epoch * remaining_epochs
-    
-    # The original one
-    """
-    scheduler = OneCycleLR(
-        optimizer,
-        max_lr=1e-3,
-        total_steps=total_steps,
-        pct_start=0.1,
-        anneal_strategy="cos",
-        div_factor=10.0,
-        final_div_factor=100.0
-    )
-    """
     if use_scheduler:
-        scheduler = OneCycleLR(
+        warmup_scheduler = LinearLR(
             optimizer,
-            max_lr=3e-4,
-            total_steps=total_steps,
-            pct_start=0.2,
-            anneal_strategy="cos",
-            div_factor=25.0,
-            final_div_factor=1000.0
+            start_factor=0.1,   # 1e-5
+            end_factor=1.0,     # 1e-4
+            total_iters=warmup_epochs,
         )
+
+        cosine_scheduler = CosineAnnealingLR(
+            optimizer,
+            T_max=num_epochs - warmup_epochs,
+            eta_min=1e-6,
+        )
+
+        scheduler = SequentialLR(
+            optimizer,
+            schedulers=[
+                warmup_scheduler,
+                cosine_scheduler,
+            ],
+            milestones=[warmup_epochs],
+        )
+
+        # ==========================================================
+        # Restore scheduler + Adam exactly when resuming
+        # ==========================================================    
+        if checkpoint is not None:
+
+            scheduler_state = checkpoint.get("scheduler_state_dict")
+
+            if scheduler_state is None:
+                raise RuntimeError(
+                    "[E] Checkpoint has no scheduler_state_dict. "
+                    "Cannot safely resume cosine schedule."
+                )
+
+            # 1. Restore scheduler position first
+            scheduler.load_state_dict(scheduler_state)
+
+            # 2. Restore Adam state and xact saved LR second
+            optimizer.load_state_dict(
+                checkpoint["optimizer_state_dict"]
+            )
+
+            print(
+                f"[I] Scheduler restored: "
+                f"last_epoch={scheduler.last_epoch}"
+            )
+
+            print(
+                f"[I] Resumed optimizer LR: "
+                f"{optimizer.param_groups[0]['lr']:.8e}"
+            )
+        print(
+            f"[I] Warmup + cosine scheduler enabled: "
+            f"warmup={warmup_epochs} epochs, "
+            f"base_lr=1e-4, eta_min=1e-6"
+        )
+
     else:
         scheduler = None
-    
-    # The scheduler for OneCycle is planned for the predefined training run.
-    # If manual resume is needed, scheduler is loaded from checkpoint.
-    if force_manual_resume and os.path.exists(manual_ckpt_path) and use_scheduler:
-        if "scheduler_state_dict" in checkpoint:
-            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-            print("[I] Scheduler state restored from checkpoint.")
+        print("[I] Scheduler disabled - constant LR")
 
     if use_scheduler:
-        print(f"[I] OneCycleLR initialized with total_steps={total_steps} "f"(epochs={remaining_epochs}, steps/epoch={steps_per_epoch})") 
+        print("[I] Scheduler enabled") 
     else:
         print("[I] Scheduler disabled - constant LR")
 
@@ -1364,18 +1372,16 @@ def main():
         plt.tight_layout()
         plt.show()
 
+    # Safety check beore training
     print("[I] Check YOLOv3 num_classes =", model.num_classes)
     for head in [model.det_head_small, model.det_head_medium, model.det_head_large]:
         print("[I] Sanity check - detection head out_channels =", head.out_channels)
 
     # Benchmarking for "num_workers". Result so far:
-    
     # num_workers = 4
     # [I] DataLoader warmup: 10 batches in 0.72 seconds
-    
     # num_workers = 6
     # [I] DataLoader warmup: 10 batches in 0.67 seconds
-     
     # num_workers = 8
     # [I] DataLoader warmup: 10 batches in 0.76 seconds
 
@@ -1389,7 +1395,7 @@ def main():
     loss_history, memory_usage_history, cuda_memory_history, iou_history = train(model=model,
         train_dataloader=train_dataloader,
         optimizer=optimizer,
-        scheduler=scheduler,                              
+        scheduler=scheduler,                          
         device=device,
         num_epochs=num_epochs,
         accumulation_steps=accumulation_steps,
@@ -1412,34 +1418,6 @@ def main():
     plt.grid(True)
     plt.show()
 
-    # Plot memory usage history
-    memory_usage_current = [x[0] for x in memory_usage_history]
-    memory_usage_peak = [x[1] for x in memory_usage_history]
-
-    plt.figure(figsize=(8, 4))
-    plt.plot(memory_usage_current, label="Current CPU Memory Usage (MB)", color="blue")
-    plt.plot(memory_usage_peak, label="Peak CPU Memory Usage (MB)", color="red")
-    plt.xlabel("Training Step")
-    plt.ylabel("Memory (MB)")
-    plt.title("CPU Memory Usage During Training")
-    plt.legend()
-    plt.grid(True)
-    plt.show()
-
-    # Plotting CUDA memory usage
-    cuda_allocated = [x[0] for x in cuda_memory_history]
-    cuda_max_allocated = [x[1] for x in cuda_memory_history]
-
-    plt.figure(figsize=(8, 4))
-    plt.plot(cuda_allocated, label="CUDA Allocated Memory (MB)", color="green")
-    plt.plot(cuda_max_allocated, label="CUDA Max Allocated Memory (MB)", color="orange")
-    plt.xlabel("Training Step")
-    plt.ylabel("Memory (MB)")
-    plt.title("CUDA Memory Usage During Training")
-    plt.legend()
-    plt.grid(True)
-    plt.show()
-
-# Wrapped into def main()
+# Wrapped into def main() to be able to use num_workers & pin_memory (except the data loader and preprocessing functions)
 if __name__ == "__main__":
     main()

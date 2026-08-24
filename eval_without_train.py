@@ -6,12 +6,14 @@ from train import run_evaluation_after_training
 from YOLO_with_ResNet50 import YOLOv3
 from data_loader import COCO_Dataset
 from train import collate_fn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 # Path
 coco_data_dir = r"C:\\Users\\viktor.acs\\Downloads\\coco_dataset"
 val_annotations_file = os.path.join(coco_data_dir, 'annotations', 'instances_val2017.json')
+# val_annotations_file = os.path.join(coco_data_dir, 'annotations', 'instances_train2017.json')
 val_image_dir = os.path.join(coco_data_dir, 'val2017')
+# val_image_dir = os.path.join(coco_data_dir, 'train2017')
 
 # Load checkpoint
 checkpoint = torch.load("yolov3_checkpoint_last_epoch.pth", map_location="cuda")
@@ -48,9 +50,32 @@ transform = transforms.Compose([
 val_dataset = COCO_Dataset(
     image_dir=val_image_dir,
     annotation_file=val_annotations_file,
-    transform=transform
+    transform=transform,
+    subset_size=None,
+    fixed_image_id=None,
+    augment=False
 )
-val_dataloader = DataLoader(val_dataset, batch_size=32, shuffle=False, collate_fn=collate_fn)
+
+val_dataloader = DataLoader(
+    val_dataset,
+    batch_size=8,
+    shuffle=False,
+    collate_fn=collate_fn,
+    num_workers=0,
+    pin_memory=True
+)
+
+# Verify exact subset
+eval_image_ids = []
+
+for images, boxes, labels, original_sizes, image_ids in val_dataloader:
+    eval_image_ids.extend([
+        int(x.item()) if torch.is_tensor(x) else int(x)
+        for x in image_ids
+    ])
+
+print("[CHECK] Number of eval images:", len(eval_image_ids))
+print("[CHECK] Eval image IDs:", eval_image_ids)
 
 # Run eval
 mAP = run_evaluation_after_training(model, val_dataloader, "cuda", val_annotations_file)

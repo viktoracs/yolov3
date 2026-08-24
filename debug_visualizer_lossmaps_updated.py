@@ -1,6 +1,6 @@
 """
-Minimal YOLOv3 Debug Visualizer (consistent with yolo_loss.py).
-Safe to run during training.
+Minimal YOLOv3 Debug Visualizer (CONSISTENT with yolo_loss.py).
+Safe to run during training!
 
 Loads a checkpoint, picks an image, generates:
     - Target objectness heatmaps (52/26/13)
@@ -8,9 +8,9 @@ Loads a checkpoint, picks an image, generates:
     - Predicted class-confidence heatmaps
     - Decoded prediction overlay on the image
     - Loss heatmaps computed in the SAME coordinate system as yolo_loss.py:
-        xy loss in pixel space ((sigmoid(xy)+grid) * stride)
-        wh loss in log-space using anchors + exp(tw/th)
-        obj/cls maps shown for POSITIVES ONLY (debug sanity)
+        * xy loss in pixel space ( (sigmoid(xy)+grid)*stride )
+        * wh loss in log-space using anchors + exp(tw/th)
+        * obj/cls maps shown for POSITIVES ONLY (debug sanity)
 """
 
 import torch
@@ -59,9 +59,9 @@ def visualize_loss_heatmap(loss_map, title):
     plt.show()
 
 
-# -----------------------------
+# -------------------------------------
 # Loss maps (aligned with yolo_loss.py)
-# -----------------------------
+# -------------------------------------
 def visualize_loss_maps(output, target, anchors, num_classes, scale_name, img_size=416):
     """
     output: [B, C, S, S]  raw model output for one scale
@@ -99,7 +99,7 @@ def visualize_loss_maps(output, target, anchors, num_classes, scale_name, img_si
     # Predictions (YOLO)
     # -----------------
     pred_xy = torch.sigmoid(pred[..., 0:2])                 # [0,1] within cell
-    pred_twth = pred[..., 2:4].clamp(-4.0, 4.0)             # stabilize
+    pred_twth = pred[..., 2:4].clamp(-6.0, 6.0)             # stabilize
     pred_obj = pred[..., 4]                                 # logits
     pred_cls = pred[..., 5:].clamp(-10, 10)                 # stabilize BCE debug
 
@@ -114,7 +114,7 @@ def visualize_loss_maps(output, target, anchors, num_classes, scale_name, img_si
     # Targets (YOLO)
     # -------------
     tgt_xy = target[..., 0:2]                               # offsets in [0,1] within cell
-    tgt_twth = target[..., 2:4].clamp(-4.0, 4.0)            # targets store log-space tw/th
+    tgt_twth = target[..., 2:4].clamp(-6.0, 6.0)            # targets store log-space tw/th
     tgt_obj = target[..., 4]                                # 0/1
     tgt_cls = target[..., 5:]                               # one-hot
 
@@ -382,6 +382,8 @@ def main():
         outputs,
         anchors=scaled_anchors,
         num_classes=num_classes,
+        # image_w=orig_size[1],
+        # image_h=orig_size[0],
         image_w = 416,
         image_h = 416,
         conf_threshold=0.5,

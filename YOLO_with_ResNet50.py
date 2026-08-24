@@ -6,95 +6,59 @@ from torchvision.ops import batched_nms
 from logger import logger
 
 """
-NOTES:
-
-The model assumes 3x416x416 input. Preprocessing happens in train.py.
+The model assumes 3x416x416 input. Preprocessing happens in train.py / data_loader.py.
 
 Backbone:
 - ResNet-50 pretrained on ImageNet (torchvision)
 - Provides feature maps at strides 8, 16, 32
 - Residual connections + BN + ReLU
 
-Detection Architecture:
-Input (416x416)
-    │
-ResNet-50 backbone
-    ├─ Layer 2 -> feature map 52x52
-    ├─ Layer 3 -> feature map 26x26
-    └─ Layer 4 -> feature map 13x13
-Feature pyramid fusion (light FPN-style)
-YOLO detection heads (x3)
-    -> Conv layers -> output tensor [B, 3, S, S, 5 + num_classes]
-
 Initialization:
-- Backbone: pretrained ImageNet
+- Backbone: ResNet-50
 - YOLO heads:
     - Xavier weight init
     - Neutral bias init:
         tx, ty, tw, th = 0
         objectness = 0 (sigmoid -> 0.5)
-        class logits = -4.5 (suppresses all classes initially)
-This avoids early collapse into everything = "person".
+        class logits = -4.5 (suppresses all classes initially) -> This avoids early collapse into everything = "person".
 
 Differences from canonical YOLOv3:
 - Original YOLOv3 uses Darknet-53 + SGD
-- This model uses ResNet-50 + Adam + OneCycleLR
+- This model uses ResNet-50 + Adam
 - Anchor scaling follows YOLOv3 conventions
 
 Why this design:
-- The assignment recommends pretrained backbones
-- ResNet-50 is available in torchvision
+- The assignment recommends pretrained backbones (ResNet-50 is available out of the box in torchvision)
 - Custom fusion needed to produce YOLO-compatible 52/26/13 maps
 
-Interpolation acts as a smooth zoom-in or zoom-out mechanism, rather than pooling's "pick the strongest" approach.
-- "nearest"= just duplicates the nearby pixel values (no smoothing or averaging). Simplest and fastest.
+Notes:
+Interpolation acts as a smooth zoom-in or zoom-out mechanism, rather than pooling's "pick the strongest" approach (allows concaten two maps cleanly without losing info):
+- "nearest"= just duplicates the nearby pixel values (no smoothing or averaging).
 - "bilinear"= weighted average of 4 nearest pixels (smoother, but more compute).
 - "bicubic"= weighted average of 16 nearest pixels (even smoother, but even more compute).
-Interpolation allows concaten two maps cleanly without losing info.
-            
 """
 
-# Current architecture:
-"""
-Input Image
-    │
-    ▼
-┌───────────┐
-│ ResNet Stem -> C1 [64, H/4]
-└───────────┘
-    │
-    ▼
-┌────────────┐
-│ Layer1 (C2) -> [256, H/4]
-└────────────┘
-    │
-    ▼
-┌────────────┐
-│ Layer2 (C3) -> [512, H/8]
-└────────────┘
-    │
-    ▼
-┌────────────┐
-│ Layer3 (C4) -> [1024, H/16]
-└────────────┘
-    │
-    ▼
-┌────────────┐
-│ Layer4 (C5) -> [2048, H/32]
-└────────────┘
-    │
-    ▼
-Top-Down FPN:
-    C5 -> reduce -> upsample
-    C4 -> reduce -> add -> upsample
-    C3 -> reduce -> add
-    │
-    ▼
-P5 -> Conv3×3 -> [1024, 13, 13] -> YOLO head -> out_large
-P4 -> Conv3×3 → [512, 26, 26] -> YOLO head -> out_medium
-P3 -> Conv3×3 → [256, 52, 52] -> YOLO head -> out_small
 
-"""
+class ConvBNLeaky(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size):
+        super().__init__()
+
+        padding = (kernel_size - 1) // 2
+
+        self.block = nn.Sequential(
+            nn.Conv2d(
+                in_channels,
+                out_channels,
+                kernel_size=kernel_size,
+                padding=padding,
+                bias=False
+            ),
+            nn.BatchNorm2d(out_channels),
+            nn.LeakyReLU(0.1, inplace=True)
+        )
+
+    def forward(self, x):
+        return self.block(x)
 
 class YOLOv3(nn.Module):
     def __init__(self, num_classes, anchors):
@@ -111,20 +75,111 @@ class YOLOv3(nn.Module):
         self.layer3 = resnet.layer3  # C4 (26x26)
         self.layer4 = resnet.layer4  # C5 (13x13)
 
-        # Reduce channels
-        self.C3_conv = nn.Conv2d(512, 256, kernel_size=1)   # C3 -> 256
-        self.C4_conv = nn.Conv2d(1024, 256, kernel_size=1)  # C4 -> 256
-        self.C5_conv = nn.Conv2d(2048, 256, kernel_size=1)  # C5 -> 256
+        # ============================================================
+        # YOLOv3-style feature fusion neck
+        # ============================================================
 
-        # FPN smoothing 3×3 convs
-        self.P3_out = nn.Conv2d(256, 256, kernel_size=3, padding=1)
-        self.P4_out = nn.Conv2d(256, 512, kernel_size=3, padding=1)
-        self.P5_out = nn.Conv2d(256, 1024, kernel_size=3, padding=1)
+        # ------------------------------------------------------------
+        # LARGE SCALE: 13×13
+        # ResNet C5: 2048 channels
+        # ------------------------------------------------------------
+        self.large_block = nn.Sequential(
+            ConvBNLeaky(2048, 512, 1),
+            ConvBNLeaky(512, 1024, 3),
+            ConvBNLeaky(1024, 512, 1),
+        )
 
-        # YOLO heads
-        self.det_head_small  = nn.Conv2d(256,  self.num_anchors*(5+num_classes), 1)
-        self.det_head_medium = nn.Conv2d(512,  self.num_anchors*(5+num_classes), 1)
-        self.det_head_large  = nn.Conv2d(1024, self.num_anchors*(5+num_classes), 1)
+        self.large_pred = ConvBNLeaky(
+            512,
+            1024,
+            3
+        )
+
+        self.det_head_large = nn.Conv2d(
+            1024,
+            self.num_anchors * (5 + num_classes),
+            kernel_size=1
+        )
+
+        # Reduce P5 before upsampling toward the 26×26 scale
+        self.large_route = ConvBNLeaky(
+            512,
+            256,
+            1
+        )
+
+
+        # ------------------------------------------------------------
+        # MEDIUM SCALE: 26×26
+        # ResNet C4: 1024 channels
+        #
+        # lateral C4 = 512
+        # upsampled P5 = 256
+        # concat = 768
+        # ------------------------------------------------------------
+        self.medium_lateral = ConvBNLeaky(
+            1024,
+            512,
+            1
+        )
+
+        self.medium_block = nn.Sequential(
+            ConvBNLeaky(768, 256, 1),
+            ConvBNLeaky(256, 512, 3),
+            ConvBNLeaky(512, 256, 1),
+        )
+
+        self.medium_pred = ConvBNLeaky(
+            256,
+            512,
+            3
+        )
+
+        self.det_head_medium = nn.Conv2d(
+            512,
+            self.num_anchors * (5 + num_classes),
+            kernel_size=1
+        )
+
+        # Reduce P4 before upsampling toward the 52×52 scale
+        self.medium_route = ConvBNLeaky(
+            256,
+            128,
+            1
+        )
+
+
+        # ------------------------------------------------------------
+        # SMALL SCALE: 52×52
+        # ResNet C3: 512 channels
+        #
+        # lateral C3 = 256
+        # upsampled P4 = 128
+        # concat = 384
+        # ------------------------------------------------------------
+        self.small_lateral = ConvBNLeaky(
+            512,
+            256,
+            1
+        )
+
+        self.small_block = nn.Sequential(
+            ConvBNLeaky(384, 128, 1),
+            ConvBNLeaky(128, 256, 3),
+            ConvBNLeaky(256, 128, 1),
+        )
+
+        self.small_pred = ConvBNLeaky(
+            128,
+            256,
+            3
+        )
+
+        self.det_head_small = nn.Conv2d(
+            256,
+            self.num_anchors * (5 + num_classes),
+            kernel_size=1
+        )
 
         # YOLO detection head initialization patch
         heads = [self.det_head_small, self.det_head_medium, self.det_head_large]
@@ -158,43 +213,125 @@ class YOLOv3(nn.Module):
             head.bias.requires_grad = True
 
     def forward(self, x):
-        # Backbone
+
+        # ============================================================
+        # ResNet50 backbone
+        # ============================================================
+
         x = self.stem(x)
-        C1 = self.layer1(x)
-        C2 = self.layer2(C1)   # 52×52
-        C3 = self.layer3(C2)   # 26×26
-        C4 = self.layer4(C3)   # 13×13
 
-        # Reduce channels
-        P5 = self.C5_conv(C4)  # 13×13
-        P4 = self.C4_conv(C3) + F.interpolate(P5, scale_factor=2, mode="nearest")  # 26×26
-        P3 = self.C3_conv(C2) + F.interpolate(P4, scale_factor=2, mode="nearest")  # 52×52
+        C2 = self.layer1(x)      # 256 channels, 104×104
+        C3 = self.layer2(C2)     # 512 channels, 52×52
+        C4 = self.layer3(C3)     # 1024 channels, 26×26
+        C5 = self.layer4(C4)     # 2048 channels, 13×13
 
-        # Smooth
-        P5 = self.P5_out(P5)
-        P4 = self.P4_out(P4)
-        P3 = self.P3_out(P3)
 
-        # YOLO heads
-        out_small  = self.det_head_small(P3)   # 52×52
-        out_medium = self.det_head_medium(P4)  # 26×26
-        out_large  = self.det_head_large(P5)   # 13×13
+        # ============================================================
+        # LARGE SCALE — 13×13
+        # ============================================================
 
-        return [out_small, out_medium, out_large]
+        P5 = self.large_block(C5)
+        # [B, 512, 13, 13]
+
+        large_features = self.large_pred(P5)
+        # [B, 1024, 13, 13]
+
+        out_large = self.det_head_large(large_features)
+        # [B, 255, 13, 13]
+
+
+        # Route large-scale features upward
+        P5_route = self.large_route(P5)
+        # [B, 256, 13, 13]
+
+        P5_up = F.interpolate(
+            P5_route,
+            scale_factor=2,
+            mode="nearest"
+        )
+        # [B, 256, 26, 26]
+
+
+        # ============================================================
+        # MEDIUM SCALE — 26×26
+        # ============================================================
+
+        C4_lateral = self.medium_lateral(C4)
+        # [B, 512, 26, 26]
+
+        P4 = torch.cat(
+            [C4_lateral, P5_up],
+            dim=1
+        )
+        # 512 + 256 = 768 channels
+
+        P4 = self.medium_block(P4)
+        # [B, 256, 26, 26]
+
+        medium_features = self.medium_pred(P4)
+        # [B, 512, 26, 26]
+
+        out_medium = self.det_head_medium(medium_features)
+        # [B, 255, 26, 26]
+
+
+        # Route medium-scale features upward
+        P4_route = self.medium_route(P4)
+        # [B, 128, 26, 26]
+
+        P4_up = F.interpolate(
+            P4_route,
+            scale_factor=2,
+            mode="nearest"
+        )
+        # [B, 128, 52, 52]
+
+
+        # ============================================================
+        # SMALL SCALE — 52×52
+        # ============================================================
+
+        C3_lateral = self.small_lateral(C3)
+        # [B, 256, 52, 52]
+
+        P3 = torch.cat(
+            [C3_lateral, P4_up],
+            dim=1
+        )
+        # 256 + 128 = 384 channels
+
+        P3 = self.small_block(P3)
+        # [B, 128, 52, 52]
+
+        small_features = self.small_pred(P3)
+        # [B, 256, 52, 52]
+
+        out_small = self.det_head_small(small_features)
+        # [B, 255, 52, 52]
+
+
+        # IMPORTANT:
+        # Keep the same order expected everywhere else.
+        return [
+            out_small,
+            out_medium,
+            out_large
+        ]
 
 
     """
-    This function processes the model's outputs. Why necessary?
+    This function (decode_predictions) processes the model's outputs. Why necessary?
     
-    The raw outputs of the YOLO model contain grid-level predictions that need to be transformed into interpretable bboxes, obj.scores and class probs.
+    The raw outputs of the YOLO model contain grid-level predictions that need to be transformed into interpretable bboxes, conf.scores and class probs.
     
     This includes:
-            -> Applying sigmoid to normalize the offsets and probabilities.
-            -> Decoding grid-cell-relative coordinates into absolute image-relative coordinates.
-            -> Adjusting bbox sizes based on anchor boxes.
-            -> Applies NMS: removes redundant predictions with high overlap (IoU) while retaining the most confident ones.
-            -> Returns human-readable predictions: Produces a structured output with decoded bboxes, confidence scores and class labels.
+        -> Applying sigmoid to normalize the offsets and probabilities.
+        -> Decoding grid-cell-relative coordinates into absolute image-relative coordinates.
+        -> Adjusting bbox sizes based on anchor boxes.
+        -> Applies NMS: removes redundant predictions with high overlap (IoU) while retaining the most confident ones.
+        -> Returns human-readable predictions: Produces a structured output with decoded bboxes, confidence scores and class labels.
     """
+    
     # Decodes YOLOv3 model outputs into bboxes, conf.scores and class labels.
     # Stateless function (does not depend on model instance variables) 
     @staticmethod
@@ -205,9 +342,9 @@ class YOLOv3(nn.Module):
         num_classes: mumber of object classes
         image_w: original image width
         image_h: original image height
-        conf_threshold: conf.threshold for filtering detections before NMS (objectness × class probability) - getting rid of the numeric noise
+        conf_threshold: conf.threshold for filtering detections before NMS (objectness × class probability)
         nms_threshold: IoU threshold for NMS
-        debug_force_class" is an optional debug parameter
+        "debug_force_class" is an optional debug parameter
             Two possible parameters:
             1. int (the model_index, e.g. 22="zebra") - forces the model to only get predictions of the provided class, no matter what the model predicted for other classes.
             2. "None" - It will show all predictions for all classes (default setting).
@@ -283,7 +420,7 @@ class YOLOv3(nn.Module):
             
             output = output.view(batch_size, grid_h, grid_w, num_anchors, num_classes + 5) 
             
-            # IMPROVE THIS: absolute_anchors is a wrong name. decode_predictions() is only called with scaled_anchors (both from train.py and evaluate.py)
+            # FIX THIS: absolute_anchors is a wrong name. decode_predictions() is only called with scaled_anchors (both from train.py and evaluate.py)
             absolute_anchors = anchor_groups[scale_idx] 
             anchor_w = torch.tensor([a[0] for a in absolute_anchors], device=output.device).view(1, 1, 1, num_anchors)
             anchor_h = torch.tensor([a[1] for a in absolute_anchors], device=output.device).view(1, 1, 1, num_anchors)
@@ -305,11 +442,10 @@ class YOLOv3(nn.Module):
             box_y = (torch.sigmoid(output[..., 1]) + grid_y) * stride
 
             # Even with a trained model, torch.exp(tw) and torch.exp(th) can explode (clamping helpes convergence, but makes it slower).
-            # 6.0 is good enough. Why? Because e.g. exp(4.0) ≈ 54.6, meaning the predicted box can be up to ~54.6× the anchor size already + the sigmoid funcion is basically flat outside ±4.0).
-            # Aligned with yolo_loss.py (hard clamping)
-            LOG_WH_CLAMP = 6.0
-            tw = output[..., 2].clamp(min=-LOG_WH_CLAMP, max=LOG_WH_CLAMP)
-            th = output[..., 3].clamp(min=-LOG_WH_CLAMP, max=LOG_WH_CLAMP)
+            # exp(4.0) ≈ 54.6, meaning the predicted box can be up to ~54.6× the anchor size and exp(-4.0) ≈ 0.018, meaning the predicted box can be as small as ~1.8% of the anchor size (plus, sigmoid funcion is basically flat outside ±4.0).
+            # MUST BE aligned with YOLO_loss.py clamping for consistency (6.0) -> LOG_WH_CLAMP = 6.0
+            tw = output[..., 2].clamp(min=-6.0, max=6.0)
+            th = output[..., 3].clamp(min=-6.0, max=6.0)
 
             logger.info(f"[I] tw/th debug - tw min={tw.min():.2f}, max={tw.max():.2f}")
             logger.info(f"[I] tw/th debug - th min={th.min():.2f}, max={th.max():.2f}")
@@ -319,9 +455,6 @@ class YOLOv3(nn.Module):
             box_h = torch.exp(th) * anchor_h * stride
 
             # Optional clamping to ensure box sizes are within image dimensions
-            # This is fragile (needs refactoring), since train.py's 416x416 call is fine, but with evaluate.py's original w and h call there will be a systematic box drift.
-            # Example: if x_max below is 420 (since box_w is calculated based on scaled_anchors - 416x416 pixel-space), then it won't be clamped by the original image size.
-            # Scaling 420 further causes box drift in evaluate.py (rule: scale first, clamp after).
             box_w = box_w.clamp(0, image_w)
             box_h = box_h.clamp(0, image_h)
 
@@ -340,8 +473,7 @@ class YOLOv3(nn.Module):
             y_max = y_max.clamp(0, image_h)
 
             # Always rescale predicted boxes from 416×416 model space back to the original image size. 
-            # Needs refactoring. Now this is fully handled in evaluate.py. This part is never called. Can be removed.
-            # decode_predictions() is now called consistently both from train.py and evaluate.py
+            # FIX THIS: This is fully handled in evaluate.py now, so that this part is never called. Can be removed.
             if image_w != 416 or image_h != 416:               
                 scale_x = image_w / 416
                 scale_y = image_h / 416
@@ -375,8 +507,7 @@ class YOLOv3(nn.Module):
             # Clamping prevents extreme logits (± inf from exploding weights) from destabilizing sigmoid or BCE loss.
             class_logits = output[..., 5:].clamp(min=-10, max=10)
 
-            # Study: "We use logistic classifiers instead of softmax for class predictions. This lets us do multi-label classification" -> BCE with sigmoid
-            # In YOLOv3, each class prediction is independent, allowing multi-label detection in a single detection area (grid cell).
+            # Study: "We use logistic classifiers instead of softmax for class predictions. This lets us do multi-label classification" -> BCE with sigmoid -> each class prediction is independent, allowing multi-label detection in a single detection area (grid cell).
             class_probs = torch.sigmoid(class_logits) 
 
             # Active if debug_force_class is enabled

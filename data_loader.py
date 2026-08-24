@@ -11,9 +11,10 @@ import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 
 class COCO_Dataset(Dataset):
-    def __init__(self, image_dir, annotation_file, transform=None, subset_size=None, fixed_image_id=None):
+    def __init__(self, image_dir, annotation_file, augment=False, transform=None, subset_size=None, fixed_image_id=None):
         self.image_dir = image_dir
         self.annotation_file = annotation_file
+        self.augment = augment
 
         # Validate the annotation file
         self.validate_annotations(annotation_file)
@@ -21,7 +22,7 @@ class COCO_Dataset(Dataset):
         self.coco = COCO(annotation_file)
         self.transform = transform
 
-        # Create COCO ID -> Model index mapping inside COCO_Dataset
+        # Create COCO ID -> Model Index mapping inside COCO_Dataset
         coco_category_ids = sorted(self.coco.getCatIds())  # Get sorted COCO category IDs
         self.coco_id_to_model_index = {coco_id: idx for idx, coco_id in enumerate(coco_category_ids)} # Example: {1: 0, ... 18: 16, ...}
 
@@ -33,7 +34,7 @@ class COCO_Dataset(Dataset):
             else:
                 raise ValueError(f"[E] Fixed image ID {fixed_image_id} not found in dataset!")
         else:
-            self.image_ids = self.coco.getImgIds()  # Ensures only valid image_ids are present in GT
+            self.image_ids = self.coco.getImgIds()  # ensures only valid image_ids present in GT
 
             # Constrain to a smaller subset if specified
             if subset_size is not None and subset_size < len(self.image_ids):
@@ -92,10 +93,9 @@ class COCO_Dataset(Dataset):
         # Convert to NumPy arrays
         boxes = np.array(boxes, dtype=np.float32)
         labels = np.array(labels, dtype=np.int64)
-        
+
         # Extended augmentations
-        # Always comment out the augmentation part here before doing an eval (otherwise the val data will be augmented as well -> much lower mAP scores)
-        if boxes.shape[0] > 0:
+        if self.augment and boxes.shape[0] > 0:
             
             # 1: Random horizontal flip (geometrical)
             if random.random() < 0.5:
@@ -106,7 +106,7 @@ class COCO_Dataset(Dataset):
                 boxes[:, 0] = W - x_max
                 boxes[:, 2] = W - x_min
 
-            # 2: Color augmentation (HSV) - no bbox alignment is needed
+            # 2: Color augmentation (HSV)
             if random.random() < 0.5:
                 # Convert RGB -> HSV
                 hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV).astype(np.float32)

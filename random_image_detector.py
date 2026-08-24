@@ -55,46 +55,35 @@ anchors = [
     [351.54059713, 159.67305114], [224.41982096, 331.08204223], [381.16142647, 359.7244103]
 ]
 
-# Small (52x52) -> Stride 8, Medium (26x26) -> Stride 16, Large (13x13) -> Stride 32
-strides = [8, 16, 32]  
+strides = [8, 16, 32]
 
-
-# scaled_anchors are provided in grid units
 scaled_anchors = [
-    (w / strides[0], h / strides[0]) for w, h in anchors[:3]   # Small scale (52x52)
-    ] + [
-        (w / strides[1], h / strides[1]) for w, h in anchors[3:6]  # Medium scale (26x26)
-    ] + [
-        (w / strides[2], h / strides[2]) for w, h in anchors[6:]   # Large scale (13x13)
-    ]
+    (w / strides[0], h / strides[0]) for w, h in anchors[:3]
+] + [
+    (w / strides[1], h / strides[1]) for w, h in anchors[3:6]
+] + [
+    (w / strides[2], h / strides[2]) for w, h in anchors[6:]
+]
+
 
 # Build model
 model = YOLOv3(num_classes=num_classes, anchors=anchors)
 model.load_state_dict(checkpoint["model_state_dict"])
 model.to("cuda").eval()
 
-# Only look for image files (no folders)
-valid_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-
+# Pick random image
+# image_files = os.listdir(image_dir)
 image_files = [
     f for f in os.listdir(image_dir)
-    if os.path.isfile(os.path.join(image_dir, f))
-    and os.path.splitext(f.lower())[1] in valid_exts
+    if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".webp"))
 ]
-
-if not image_files:
-    raise RuntimeError(f"No valid image files found in {image_dir}")
-
-# Pick a random image
+random_file = random.choice(image_files)
 random_file = random.choice(image_files)
 image_path = os.path.join(image_dir, random_file)
 print(f"[I] Running inference on {image_path}")
 
 # Load and preprocess image (keep original size for drawing later)
 orig_img = cv2.imread(image_path)
-if orig_img is None:
-    raise RuntimeError(f"OpenCV could not read image: {image_path}")
-
 orig_h, orig_w = orig_img.shape[:2]
 
 # Preprocess for YOLO 416x416
@@ -114,14 +103,13 @@ with torch.no_grad():
 # Decode predictions
 preds = model.decode_predictions(
     outputs,
-    anchors=scaled_anchors,
+    # anchors=model.anchors, # It was a bug! The decoder expects grid-relative (scaled) anchors
+    anchors = scaled_anchors,
     num_classes=num_classes,
-    # image_w=orig_w,
-    # image_h=orig_h,
     image_w = 416,
     image_h = 416,
-    conf_threshold=0.95,
-    nms_threshold=0.1,
+    conf_threshold=0.55,
+    nms_threshold=0.45,
     debug_force_class=None
 )
 
@@ -181,18 +169,6 @@ for (x1, y1, x2, y2), conf, cls in zip(boxes, scores, labels):
         color,
         -1,
     )
-
-    # Transparent background for text
-    overlay = orig_img.copy()
-    cv2.rectangle(
-        overlay,
-        (text_x, text_y - text_h - 4),
-        (min(text_x + text_w + 2, W - 1), text_y),
-        color,
-        -1,
-    )
-    alpha = 0.0  # transparency factor (0: 100% transparent, 1: 100% opaque)
-    orig_img = cv2.addWeighted(overlay, alpha, orig_img, 1 - alpha, 0)
 
     # Put black text on the green background
     cv2.putText(

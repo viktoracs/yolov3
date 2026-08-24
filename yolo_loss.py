@@ -2,11 +2,13 @@ import torch
 import torch.nn.functional as F
 from logger import logger
 
-# Functions to create the ignore mask based on IoU thresholding
 # Ignore mask is used to avoid penalizing predictions that have high IoU with any GT box (don't count as FPs). Ergo don't use only the highest-IoU anchor and punish the rest.
-# Symptom: the loss heatmaps showed objectness blobs around GT boxes, because the model tried to predict objects there, but was penalized as FPs (for all non-assigned anchors).
-# Why not mentioned in the study? ChatGPT: "Because it was considered an implementation detail, not a conceptual contribution and in Darknet it was already obvious to the authors."
+# It avoids contradictory supervision around real objects.
+# Symptom: the loss heatmaps showed objectness blobs around GT boxes, because the model tried to predict objects there, but was penalized as FPs (for all non-assigned anchors)
+
 """
+ChatGPT: 
+
 A useful mental analogy. 
 
 Imagine grading students:
@@ -16,12 +18,12 @@ Imagine grading students:
 What happens?
 - One perfect score.
 - Everyone else clustered around "barely pass".
-- No clear distinction of who actually knows the material. 
-    -> 50% chance of objectness everywhere (NMS tries to handle this, but NMS is intended for getting rid of the redundant boxes)
+- No clear distinction of who actually knows the material.
 """
 
 # YOLO predicts in grid space, but must be judged in pixel space, because IoU lives there. This is a slight deviation from YOLOv3.
-# ------------------------------
+
+
 # Convert from center to corner format (can be refactored based on train.py)
 def xywh_to_xyxy(xywh):
     x, y, w, h = xywh.unbind(-1)
@@ -51,12 +53,9 @@ def box_iou_xyxy(boxes1, boxes2):
     area2 = (b2[..., 2] - b2[..., 0]).clamp(min=0) * (b2[..., 3] - b2[..., 1]).clamp(min=0)
 
     return inter / (area1 + area2 - inter + 1e-9)
-# ------------------------------
 
 def yolo_loss(pred, target, anchors, num_classes, scale_name="unknown"):
     """
-    NOTES:
-
     Losses:
     1. Localization loss (xy_loss + wh_loss)
     2. Objectness loss (confidence loss for object-containing cells) -> TP / FN
@@ -72,9 +71,9 @@ def yolo_loss(pred, target, anchors, num_classes, scale_name="unknown"):
 
     | Component            | Goal                         | Loss Function Used         | Type                       |
     | -------------------- | ---------------------------- | -------------------------- | -------------------------- |
-    | Box (x, y, w, h)     | Predict accurate boxes       | MSE (in log-space for w/h) | Regression                 |
+    | Box (x, y, w, h)     | Predict boxes                | MSE (in log-space for w/h) | Regression                 |
     | Objectness           | Is there an object?          | BCE with logits            | Binary classification      |
-    | No-object            | Avoid false positives        | BCE with logits            | Binary classification      |
+    | No-object            | Avoid FPs                    | BCE with logits            | Binary classification      |
     | Classification       | Predict correct class (0-79) | BCE with logits            | Multi-class classification |
     """
 
@@ -85,10 +84,9 @@ def yolo_loss(pred, target, anchors, num_classes, scale_name="unknown"):
     logger.info(f"[I] Entry check (positives in target): {(target[..., 4] > 0).sum().item()} at scale {scale_name}")
 
     # Apply the same clamping for target and GT 
-    # Aligned with YOLO_with_ResNet50.py
     LOG_WH_CLAMP = 6.0
 
-    # Safet check: one-hot vector size
+    # Safety check: one-hot vector size
     one_hot = target[..., 5:]
     if one_hot.shape[-1] > num_classes:
         logger.error(f"[E] One-hot vector too large: {one_hot.shape[-1]} > {num_classes}")
@@ -131,7 +129,7 @@ def yolo_loss(pred, target, anchors, num_classes, scale_name="unknown"):
     pred_class = pred[..., 5:].clone()
     pred_class = pred_class.clamp(-10.0, 10.0)
     
-    # GT
+    # GT 
     target_boxes = target[..., 0:4]
     target_conf = target[..., 4:5].float()
     target_class = (target[..., 5:] == 1.0).float()
@@ -147,15 +145,12 @@ def yolo_loss(pred, target, anchors, num_classes, scale_name="unknown"):
     
     anchor_tensor = torch.tensor(anchors, dtype=torch.float32, device=pred.device).view(1, num_anchors, 1, 1, 2) 
   
-    # Add this early to verify getting positives
+    # Verify getting positives
     num_pos = object_mask.sum().clamp(min=1.0)
 
-    # Decode predicted tw/th into width/height in pixels (prediction)
-    # Predicted offsets by the model (log scale NOT pixel scale)
+    # Decode predicted tw/th into width/height in pixels (predicted offsets by the model - log scale NOT pixel scale)
     pred_tw_th = pred[..., 2:4]
 
-    # FIX: both prediction and target are already log-space
-    # Aligned with YOLO_with_ResNet50.py
     log_pred_wh = pred_tw_th.clamp(-LOG_WH_CLAMP, LOG_WH_CLAMP)
     log_target_wh = target_boxes[..., 2:4].clamp(-LOG_WH_CLAMP, LOG_WH_CLAMP)
 
@@ -173,15 +168,13 @@ def yolo_loss(pred, target, anchors, num_classes, scale_name="unknown"):
         indexing="ij"
     )
     grid = torch.stack([grid_x, grid_y], dim=-1).view(1, 1, S, S, 2).float()
-
+    
     # Decode centers to pixel space (YOLOv3-style supervision) 
     # Stable pixel-space decoding: gradients flow through xy only, not grid  
     pred_xy_px = (xy * stride) + (grid * stride).detach()
     gt_xy_px   = (target_boxes[..., 0:2] + grid) * stride
 
-    # _______
     # LOSSES:
-    # _______
 
     # Delta in pixels (prevents multiplying the gradients by the stride)
     delta_xy_px = pred_xy_px - gt_xy_px
@@ -202,7 +195,6 @@ def yolo_loss(pred, target, anchors, num_classes, scale_name="unknown"):
         )
 
     # Log: pixel-space center error (matches xy_loss) - The model is trained in grid space, but the loss is computed in pixel space (xy_loss = pixel space, wh_loss = log space)
-    # Larger objects produced larger absolute x/y gradients. This caused the numerical instability (NaN). Removed AMP (only FP32). 
     center_error_px = torch.norm(
         pred_xy_px - gt_xy_px,
         dim=-1
@@ -229,17 +221,17 @@ def yolo_loss(pred, target, anchors, num_classes, scale_name="unknown"):
         gt_tw_pos = log_target_wh[..., 0][object_mask]
         gt_th_pos = log_target_wh[..., 1][object_mask]
 
+
         logger.info(f"[I] Pred tw -> min={pred_tw_pos.min():.4f}, max={pred_tw_pos.max():.4f}, mean={pred_tw_pos.mean():.4f}")
         logger.info(f"[I] Pred th -> min={pred_th_pos.min():.4f}, max={pred_th_pos.max():.4f}, mean={pred_th_pos.mean():.4f}")
         logger.info(f"[I] GT   tw -> min={gt_tw_pos.min():.4f}, max={gt_tw_pos.max():.4f}, mean={gt_tw_pos.mean():.4f}")
         logger.info(f"[I] GT   th -> min={gt_th_pos.min():.4f}, max={gt_th_pos.max():.4f}, mean={gt_th_pos.mean():.4f}")
-    
-    # Using MSE on log-space width/height 
-    # (pred - target) provides the same gradient as the standard MSE formula (target - pred) - MSE is symmetric
-    # (pred - target) matches autograd's convention (gradients flow through preds)
+
+    # Using MSE on log-space width/height: (pred - target) provides the same gradient as the standard MSE formula (target - pred) - MSE is symmetric
     wh_loss = torch.sum(
         object_mask.unsqueeze(-1).float() * (log_pred_wh - log_target_wh) ** 2
-    ) / num_pos # Computed only for the positive anchors 
+    ) / num_pos 
+    # Computed only for the positive anchors 
 
     if object_mask.any():
         logger.info(
@@ -267,7 +259,7 @@ def yolo_loss(pred, target, anchors, num_classes, scale_name="unknown"):
         else:
             logger.info("[W] Objectness - No GT-matched objectness locations in this batch")
     
-    # Using BCE for objectness and classification  
+    # Using BCE for objectness and classification
     # 2. Objectness loss (TP)
     if object_mask.any():
         pred_obj = pred_conf[object_mask].float().clamp(-10,10)
@@ -284,7 +276,8 @@ def yolo_loss(pred, target, anchors, num_classes, scale_name="unknown"):
     # pred_xy_px = (xy + grid) * stride
     
     # Decode predicted boxes (pixel space)
-    # Reuse stable pixel-space centers (grid must not influence gradients)
+    # Reuse stable pixel-space centers (grid must not influence gradients!)
+    # pred_xy_px = (xy * stride) + (grid * stride).detach() # Already declared above
     pred_wh_px = pred_wh * stride
     with torch.no_grad():
         pred_boxes_xyxy = xywh_to_xyxy(torch.cat([pred_xy_px, pred_wh_px], dim=-1))
@@ -334,7 +327,6 @@ def yolo_loss(pred, target, anchors, num_classes, scale_name="unknown"):
         else:
             logger.info(f"[IoU@GT][{scale_name}] no GT boxes in batch")
 
-
     ignore_mask = torch.zeros_like(object_mask, dtype=torch.bool)
 
     for b in range(batch_size):
@@ -351,6 +343,54 @@ def yolo_loss(pred, target, anchors, num_classes, scale_name="unknown"):
     # 3. No-object loss (negative anchors - FP) - new way with ignore mask (don't penalize any anchors that have high IoU with GT boxes)
     noobj_mask = (~object_mask) & (~ignore_mask)
 
+    num_noobj = noobj_mask.sum().clamp(min=1.0)
+    """
+    # Standard BCE:
+    if noobj_mask.any():
+
+        pred_noobj = pred_conf[noobj_mask].float().clamp(-10, 10)
+        tgt_noobj = target_conf[noobj_mask].float()
+
+        no_obj_loss = F.binary_cross_entropy_with_logits(
+            pred_noobj,
+            tgt_noobj,
+            reduction="sum"
+        ) / num_noobj
+
+    else:
+        no_obj_loss = pred_conf.new_tensor(0.0)
+    """
+
+    # Weighted BCE: hard weight on confident FPs
+    # With mean no-object BCE, the relatively few high-confidence FPs were diluted by thousands of easy background examples (small head alone: 52 x 52 x 3 = 8112).
+    # Thus confident FPs contribute much more strongly while already correct background FPS contributed very little.
+    
+    # Standard BCE: "Learn background everywhere."
+    # Weighted BCE: "You already understand most background. Spend your gradient budget on the background you keep mistaking for objects." 
+    
+    if noobj_mask.any():
+
+        pred_noobj = pred_conf[noobj_mask].float().clamp(-10, 10)
+        tgt_noobj = target_conf[noobj_mask].float()
+
+        bce = F.binary_cross_entropy_with_logits(
+            pred_noobj,
+            tgt_noobj,
+            reduction="none"
+        )
+
+        p = torch.sigmoid(pred_noobj)
+        gamma = 2.0
+        hard_weight = p.detach().pow(gamma) # Assigns large weights to confident FPs (small values [=background] shrink proportionally much more)
+
+        no_obj_loss = (
+            (hard_weight * bce).sum()
+            / (hard_weight.sum() + 1e-6) # Average over the effective hard-negative mass
+        )
+
+    else:
+        no_obj_loss = pred_conf.new_tensor(0.0)    
+
     # Log: objectness statistics (now masks are meaningful)
     with torch.no_grad():
         if object_mask.any():
@@ -366,23 +406,11 @@ def yolo_loss(pred, target, anchors, num_classes, scale_name="unknown"):
         logger.info(
             f"[I][{scale_name}] obj@pos={obj_pos_mean:.4f}, obj@neg={obj_neg_mean:.4f}"
         )
-
-    # num_noobj = number of grid × anchor positions that are true background
-    # "If there are 0 no-object cells, pretend there is 1." -> clamp ensures that "normalize by count" never divides by zero -> NaN
-    # TN = the inverse of the object and ignore mask
-    num_noobj = noobj_mask.sum().clamp(min=1.0)
-
-    # No-object loss (safe)
-    if noobj_mask.any():
-        pred_noobj = pred_conf[noobj_mask].float().clamp(-10, 10)
-        tgt_noobj  = target_conf[noobj_mask].float()
-        
-        # Computed for anchors not assigned to objects
-        no_obj_loss = F.binary_cross_entropy_with_logits(
-            pred_noobj, tgt_noobj, reduction="sum"
-        ) / num_noobj # Divide the loss by the number of TN not by the TP (object-containing) cells. Otherwise the divisor will be tiny -> NaN for no-obj loss (gradient descent doesn’t understand intention, only magnitude).
-    else:
-        no_obj_loss = pred_conf.new_tensor(0.0)
+        print(
+            f"[I][{scale_name}] "
+            f"obj@pos={obj_pos_mean:.4f}, "
+            f"obj@neg={obj_neg_mean:.4f}"
+        )
 
     # Log: inspect raw class predictions before loss (how confident the model is about class predictions)
     with torch.no_grad():
@@ -422,7 +450,7 @@ def yolo_loss(pred, target, anchors, num_classes, scale_name="unknown"):
         class_loss = pred_class.new_tensor(0.0)
     else:
         class_loss = F.binary_cross_entropy_with_logits(pred_class_active, target_onehot_active, reduction="sum")
-        class_loss = class_loss / (num_pos_anchors + 1e-6) # Only computed for positive anchors (this is practically num_pos -> needs refactoring)
+        class_loss = class_loss / (num_pos_anchors + 1e-6) # Only computed for positive anchors (this is practically num_pos -> refactor)
 
     # Interim loss logging for tracking during training
     logger.info(f"[I] Box Loss: {box_loss.item():.4f}, Objectness Loss: {obj_loss.item():.4f}, "
@@ -430,19 +458,16 @@ def yolo_loss(pred, target, anchors, num_classes, scale_name="unknown"):
     print(f"[I] Box Loss: {box_loss.item():.4f}, Objectness Loss: {obj_loss.item():.4f}, "
           f"No-Object Loss: {no_obj_loss.item():.4f}, Class Loss: {class_loss.item():.4f}")
     
-    # ________________________
+
     # LOSS WEIGHTS (lambdas)
-    # ________________________
-    
+
     # Boosts box regression, since "where?" is more important than "what?" in the beginning (this is a zero-sum game for gradient sharing - how to spend the budget?)
     lambda_box = 5.0
 
-    # Objectness is the "glue" between regression and classification. 
-    # Scales the loss on positive anchors (makes true object anchors confident).      
-    lambda_obj = 2.0
+    # Objectness is the "glue" between regression and classification (punishes FNs)     
+    lambda_obj = 1.0
 
-    # Encourages the model to predicted objects (more FPs) instead of playing safe ("There is no object." - FN) in the early phase of the training.
-    # Scales the loss on background anchors (makes background anchors unconfident).
+    # Encourages the model to predicted objects (more FPs) instead of playing safe ("There is no object." - FN) in the early phase of the training (punishes FPs)
     lambda_noobj = 1.0
     
     # The model must learn first where objects are (regression + objectness) before it can learn what they are (classification).
@@ -455,28 +480,8 @@ def yolo_loss(pred, target, anchors, num_classes, scale_name="unknown"):
         lambda_obj * obj_loss +
         lambda_noobj * no_obj_loss +
         lambda_cls * class_loss
-    ) # / batch_size 
-    # Removed, since the loss values were already normalized (the classification branch got much less gradients).
-    # Loss magnitude should be independent of batch size.
-
-    # Logit penalty option
-    # Prevent logit saturation (overlapping boxes with 1.0 confidence -> NMS cannot rank).
-    # Training regularization on logits, not standard YOLOv3.
-    # Why? Because Adam + OneCycle are applied with YOLOv3 style implementation (more aggressive than the original SGD).
-    """
-    logit_penalty = 1e-4 * (
-        pred_class.pow(2).mean() +
-        pred_conf.pow(2).mean()
-    )
-    total_loss += logit_penalty
-    """
-
-    # Fallback option for logit saturation. Introduce only at inference time, so that NMS can make a difference (doesn't affect the training).
-    """
-    T = 1.5
-    class_probs = torch.sigmoid(class_logits / T)
-    scores = obj_probs * class_probs
-    """
+    ) 
+    # Removed "/ batch_size", since loss values were already normalized (the classification branch got much less gradients). Loss magnitude should be independent of batch size.
 
     # Safety check: replace NaNs with zero
     if not torch.isfinite(total_loss):
