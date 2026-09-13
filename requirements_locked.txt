@@ -1,3 +1,6 @@
+albucore==0.0.24
+albumentations==2.0.8
+annotated-types==0.8.0
 brotlicffi @ file:///C:/miniconda3/conda-bld/brotlicffi_1764961372591/work
 certifi @ file:///C:/Users/task_176765902528894/croot/certifi_1767659216804/work/certifi
 cffi @ file:///C:/miniconda3/conda-bld/cffi_1761832794697/work
@@ -22,10 +25,13 @@ mpmath @ file:///C:/b/abs_7833jrbiox/croot/mpmath_1690848321154/work
 networkx @ file:///C:/b/abs_b054htfn9t/croot/networkx_1737043671910/work
 numpy @ file:///C:/b/abs_0123vcxhf8/croot/numpy_and_numpy_base_1725470331966/work/dist/numpy-2.0.1-cp310-cp310-win_amd64.whl#sha256=e824ec3b279f4c5207736c83ac2f2dc79b489e08501a4ea9e3fc178c45db289b
 opencv-python==4.13.0.92
+opencv-python-headless==5.0.0.93
 packaging @ file:///C:/miniconda3/conda-bld/packaging_1761049101700/work
 pillow @ file:///C:/b/abs_b50vowcrzo/croot/pillow_1738010273782/work
 pycocotools==2.0.11
 pycparser @ file:///C:/miniconda3/conda-bld/pycparser_1757496059965/work
+pydantic==2.13.5
+pydantic_core==2.46.5
 pyparsing==3.3.2
 PySocks @ file:///C:/miniconda3/conda-bld/pysocks_1761753030270/work
 python-dateutil==2.9.0.post0
@@ -33,12 +39,15 @@ PyYAML @ file:///C:/miniconda3/conda-bld/pyyaml_1763465513320/work
 requests @ file:///C:/miniconda3/conda-bld/requests_1762359612241/work
 scikit-learn==1.7.2
 scipy==1.15.3
+simsimd==6.5.16
 six==1.17.0
+stringzilla==5.1.2
 sympy==1.13.1
 threadpoolctl==3.6.0
 torch==2.5.1
 torchvision==0.20.1
 tqdm==4.67.3
+typing-inspection==0.4.4
 typing_extensions @ file:///C:/b/abs_ecq8gc0vbm/croot/typing_extensions_1756281142218/work
 urllib3 @ file:///C:/Users/task_176781036207501/croot/urllib3_1767810484846/work
 win_inet_pton @ file:///C:/miniconda3/conda-bld/win_inet_pton_1761746276406/work

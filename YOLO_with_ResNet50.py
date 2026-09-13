@@ -24,18 +24,17 @@ Initialization:
 
 Differences from canonical YOLOv3:
 - Original YOLOv3 uses Darknet-53 + SGD
-- This model uses ResNet-50 + Adam
-- Anchor scaling follows YOLOv3 conventions
+- This model uses ResNet-50 + Adam (anchor scaling follows YOLOv3 conventions)
 
 Why this design:
 - The assignment recommends pretrained backbones (ResNet-50 is available out of the box in torchvision)
-- Custom fusion needed to produce YOLO-compatible 52/26/13 maps
+- Custom fusion (FPN) needed to produce YOLO-compatible 52/26/13 maps
 
 Notes:
 Interpolation acts as a smooth zoom-in or zoom-out mechanism, rather than pooling's "pick the strongest" approach (allows concaten two maps cleanly without losing info):
-- "nearest"= just duplicates the nearby pixel values (no smoothing or averaging).
-- "bilinear"= weighted average of 4 nearest pixels (smoother, but more compute).
-- "bicubic"= weighted average of 16 nearest pixels (even smoother, but even more compute).
+- "nearest"= just duplicates the nearby pixel values (no smoothing or averaging)
+- "bilinear"= weighted average of 4 nearest pixels (smoother, but more compute)
+- "bicubic"= weighted average of 16 nearest pixels (even smoother, but even more compute)
 """
 
 
@@ -322,7 +321,7 @@ class YOLOv3(nn.Module):
     """
     This function (decode_predictions) processes the model's outputs. Why necessary?
     
-    The raw outputs of the YOLO model contain grid-level predictions that need to be transformed into interpretable bboxes, conf.scores and class probs.
+    The raw outputs of the YOLO model contain grid-level predictions that need to be transformed into interpretable bboxes, objectness and class probs.
     
     This includes:
         -> Applying sigmoid to normalize the offsets and probabilities.
@@ -345,7 +344,7 @@ class YOLOv3(nn.Module):
         conf_threshold: conf.threshold for filtering detections before NMS (objectness × class probability)
         nms_threshold: IoU threshold for NMS
         "debug_force_class" is an optional debug parameter
-            Two possible parameters:
+            Two possible values:
             1. int (the model_index, e.g. 22="zebra") - forces the model to only get predictions of the provided class, no matter what the model predicted for other classes.
             2. "None" - It will show all predictions for all classes (default setting).
 

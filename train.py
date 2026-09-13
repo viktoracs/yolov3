@@ -50,9 +50,9 @@ warnings.filterwarnings("ignore", message="expandable_segments not supported")
 """
 import torch
 ckpt = torch.load("yolov3_checkpoint_last_epoch.pth", map_location="cpu")
-ckpt["epoch"] = 20  # restore correct counter
+ckpt["epoch"] = 8  # restore correct counter
 torch.save(ckpt, "yolov3_checkpoint_last_epoch.pth")
-print("Epoch number corrected to 20")
+print("Epoch number corrected to 8")
 """
 
 # Checks the actual epoch number for the saved model:
@@ -316,7 +316,7 @@ def main():
     # ===================================
 
     # num_epochs = the actual epoch where we are (additional_epochs = how much more to train)
-    num_epochs = 27
+    num_epochs = 50
     accumulation_steps = 1
 
     checkpoint_best_path = os.path.join(os.getcwd(), "yolov3_general_checkpoint_best.pth")
@@ -1093,6 +1093,13 @@ def main():
     # Updates the weights of the model during training using an adaptive learning rate (lr = 0.0001) - good for object detection
     optimizer = Adam(model.parameters(), lr=1e-4) # lr=1e-3, weight_decay=5e-4 or 0.0
     """
+    
+    """
+    LR experiments:
+    1. 2-epoch warmup + cosine annealing: Best mAP@[.50:.95] at epoch 48: 0.2237 | Best AP50 at epoch 33: 0.409 (winner by a tiny margin)
+    2. Constant/manual LR: mAP@[.50:.95] at epoch 20: 0.2011 | AP50: 0.380 (underperformed, stopped early)
+    3. OneCycle: Best mAP@[.50:.95] at epoch 48: 0.2237 | Best AP50 at epoch 33: 0.408
+    """
    
     # Adam is a type of gradient descent (like SGD) with adaptive learning rate (based on past squared gradients), helps faster convergence.
     optimizer = Adam(model.parameters(), lr=1e-4)
@@ -1129,10 +1136,10 @@ def main():
     start_epoch = 0
     best_mAP = 0.0
 
-    additional_epochs = 23
+    additional_epochs = 0
 
     # Manual checkpoint control
-    force_manual_resume = True # Set True only when want to resume from a saved checkpoint (training stopped for whatever reason)
+    force_manual_resume = False # Set True only when want to resume from a saved checkpoint (training stopped for whatever reason)
     manual_ckpt_path = os.path.join(os.getcwd(), "yolov3_checkpoint_last_epoch.pth")
 
     # Manual switch (Option 1 will switch it anyway)

@@ -28,7 +28,7 @@ coco_classes = {
 }
 
 # Paths
-checkpoint_path = "yolov3_checkpoint_last_epoch.pth"
+checkpoint_path = r"C:\Users\viktor.acs\Downloads\Git_Tragedy\logs\49_epoch_checkpoint_full_cosine_new_architecture_affine_crop\yolov3_checkpoint_last_epoch.pth"
 
 # For COCO val images
 # image_dir = r"C:\Users\viktor.acs\Downloads\coco_dataset\val2017"
@@ -77,7 +77,6 @@ image_files = [
     f for f in os.listdir(image_dir)
     if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".webp"))
 ]
-random_file = random.choice(image_files)
 random_file = random.choice(image_files)
 image_path = os.path.join(image_dir, random_file)
 print(f"[I] Running inference on {image_path}")
@@ -128,7 +127,7 @@ boxes[:, [1, 3]] *= sy
 # Draw predictions with class names and scores with filled background (YOLO style), inside the bbox (bottom-left corner) if it fits, otherwise above the box 
 for (x1, y1, x2, y2), conf, cls in zip(boxes, scores, labels):
     class_name = coco_classes.get(int(cls), f"id_{int(cls)}")
-    label_text = f"{class_name}: {conf:.2f}"
+    label_text = f"{class_name}: {conf * 100:.0f}%"
 
     # Bbox and box color (green)
     color = (0, 255, 0)

@@ -9,12 +9,46 @@ import random
 import numpy as np
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
+import albumentations as A
 
 class COCO_Dataset(Dataset):
     def __init__(self, image_dir, annotation_file, augment=False, transform=None, subset_size=None, fixed_image_id=None):
         self.image_dir = image_dir
         self.annotation_file = annotation_file
         self.augment = augment
+        self.affine_transform = A.Compose(
+            [
+                A.Affine(
+                    scale=(0.85, 1.15), # zoom out and in
+                    translate_percent=(-0.075, 0.075), # randomly shifts the image horizontally and vertically (7.5%)
+                    rotate=0,
+                    shear=0,
+                    p=0.35 # probability
+                ),
+
+                A.RandomSizedBBoxSafeCrop(
+                    height=416,
+                    width=416,
+                    p=0.25,
+                ),
+
+                A.CoarseDropout( # The more general replacment of A.Cutout (teaches robustness to occlusion)
+                    num_holes_range=(1, 3), # min and max number of the black rectangles
+                    hole_height_range=(0.05, 0.12), # height range: 5-12% of the image size
+                    hole_width_range=(0.05, 0.12), # width range: 5-12% of the image size
+                    fill=0,
+                    p=0.25, # probability
+                )
+
+            ],
+            bbox_params=A.BboxParams(
+                format="pascal_voc",
+                label_fields=["labels"],
+                min_visibility=0.20,
+                clip=True,
+                filter_invalid_bboxes=True
+            ),
+        )
 
         # Validate the annotation file
         self.validate_annotations(annotation_file)
@@ -97,7 +131,7 @@ class COCO_Dataset(Dataset):
         # Extended augmentations
         if self.augment and boxes.shape[0] > 0:
             
-            # 1: Random horizontal flip (geometrical)
+            # 1: Random horizontal flip (coded manually) -> Switch to Albumentations later
             if random.random() < 0.5:
                 image = cv2.flip(image, 1)
                 W = original_size[1]
@@ -127,7 +161,57 @@ class COCO_Dataset(Dataset):
 
                 # Convert back HSV -> RGB
                 image = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
-        
+
+            # 3: Albumentations augmentation coming from A.Compose:
+            # affine scale/translation improves robustness to object size & position
+            # bbox-safe crop changes framing/composition
+            # dropout improves robustness to partial occlusion
+            transformed = self.affine_transform(
+                image=image,
+                bboxes=boxes.tolist(),
+                labels=labels.tolist(),
+            )
+
+            image = transformed["image"]
+
+            boxes = np.asarray(
+                transformed["bboxes"],
+                dtype=np.float32
+            )
+
+            labels = np.asarray(
+                transformed["labels"],
+                dtype=np.int64
+            )
+
+            # Safety checks after bbox-aware augmentation
+            if boxes.size > 0:
+                H, W = image.shape[:2]
+
+                assert np.isfinite(boxes).all(), \
+                    "[E] Non-finite bbox after affine augmentation"
+
+                assert (boxes[:, 0] >= 0).all(), \
+                    "[E] x_min < 0 after affine"
+
+                assert (boxes[:, 1] >= 0).all(), \
+                    "[E] y_min < 0 after affine"
+
+                assert (boxes[:, 2] <= W).all(), \
+                    "[E] x_max outside image after affine"
+
+                assert (boxes[:, 3] <= H).all(), \
+                    "[E] y_max outside image after affine"
+
+                assert (boxes[:, 2] > boxes[:, 0]).all(), \
+                    "[E] invalid bbox width after affine"
+
+                assert (boxes[:, 3] > boxes[:, 1]).all(), \
+                    "[E] invalid bbox height after affine"
+
+                assert len(boxes) == len(labels), \
+                    "[E] Box/label count mismatch after affine"
+                    
         # Apply transformations
         if self.transform:
 

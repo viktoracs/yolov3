@@ -114,12 +114,11 @@ def yolo_loss(pred, target, anchors, num_classes, scale_name="unknown"):
     pred = pred.float()
     target = target.float()
 
-    # Detect and handle NaNs in model outputs
+    # Detect NaNs in model outputs
     if not torch.isfinite(pred).all():
         bad = (~torch.isfinite(pred)).sum().item()
         logger.error(f"[E][{scale_name}] Non-finite values in pred: count={bad}")
         print(f"[E][{scale_name}] Non-finite values in pred: count={bad}")
-        # raise RuntimeError(f"Non-finite pred at {scale_name}")
 
     # Objectness
     pred_conf = pred[..., 4:5].clone()
@@ -272,12 +271,9 @@ def yolo_loss(pred, target, anchors, num_classes, scale_name="unknown"):
     # YOLO ignore-IoU logic
     # ----------------------
     ignore_thresh = 0.5
-
-    # pred_xy_px = (xy + grid) * stride
     
     # Decode predicted boxes (pixel space)
     # Reuse stable pixel-space centers (grid must not influence gradients!)
-    # pred_xy_px = (xy * stride) + (grid * stride).detach() # Already declared above
     pred_wh_px = pred_wh * stride
     with torch.no_grad():
         pred_boxes_xyxy = xywh_to_xyxy(torch.cat([pred_xy_px, pred_wh_px], dim=-1))
@@ -288,7 +284,6 @@ def yolo_loss(pred, target, anchors, num_classes, scale_name="unknown"):
 
     # Decode GT boxes (pixel space)
     gt_xy_px = (target_boxes[..., 0:2] + grid) * stride
-    # gt_wh_px = target_wh * stride
     gt_wh_px = gt_wh * stride
     gt_boxes_xyxy = xywh_to_xyxy(
         torch.cat([gt_xy_px, gt_wh_px], dim=-1)
