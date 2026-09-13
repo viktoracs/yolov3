@@ -9,9 +9,9 @@
 ### Trained on NVIDIA GeForce RTX 4070 Ti.
 
 ### mAP score achieved:
-- **mAP@[0.5:0.95]: 0.2237**
-- **AP50: 0.406**
-- **AP75: 0.222**
+- **mAP@[0.5:0.95]: 0.2609**
+- **AP50: 0.456**
+- **AP75: 0.261**
 
 This result was obtained with:
 - Fixed input size: 416x416
@@ -20,7 +20,7 @@ This result was obtained with:
 - LR schedule: 2-epoch linear warmup followed by cosine annealing
 - Minimum LR: 1e-6
 - Duration: 50 epochs
-- Simple augmentations (horizontal flip, hue, saturation, brightness)
+- Augmentation experiments: horizontal flip, HSV, affine, crop, dropout 
  
 ### Executable files
 
