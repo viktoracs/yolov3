@@ -126,8 +126,8 @@ def evaluate_model(model, data_loader, device, coco_gt_path, output_json_path, c
                     num_classes=model.num_classes,
                     image_w=416,
                     image_h=416,
-                    nms_threshold=0.5,
-                    conf_threshold=0.001, # Keep boxes and let NMS do the job in early training
+                    nms_threshold=0.5 # Post-processing: suppress duplicate same-class detections before COCO evaluation
+                    conf_threshold=0.001, # Keep low-score candidates so the precision-recall curve is not truncated prematurely
                     debug_force_class=None,
                 ) 
                 """
