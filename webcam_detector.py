@@ -1,6 +1,7 @@
 import warnings
 import cv2
 import torch
+import time
 from torchvision import transforms
 from YOLO_with_ResNet50 import YOLOv3
 
@@ -154,6 +155,9 @@ processed = 0
 
 print("[I] Starting video inference...")
 
+prev_time = time.perf_counter()
+fps_smooth = 0.0
+
 try:
     while True:
         ret, frame = cap.read()
@@ -173,11 +177,23 @@ try:
             .to(device)
         )
 
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+
+        infer_start = time.perf_counter()
+
         # --------------------------------------------
         # Forward pass
         # --------------------------------------------
         with torch.inference_mode():
             outputs = model(input_tensor)
+
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+
+            infer_end = time.perf_counter()
+
+            inference_ms = (infer_end - infer_start) * 1000.0
 
             preds = model.decode_predictions(
                 outputs,
@@ -291,6 +307,33 @@ try:
                 thickness,
                 cv2.LINE_AA,
             )
+
+        current_time = time.perf_counter()
+        frame_time = current_time - prev_time
+        prev_time = current_time
+
+        instant_fps = 1.0 / frame_time if frame_time > 0 else 0.0
+
+        # Smooth the displayed FPS so it does not jump constantly
+        if fps_smooth == 0.0:
+            fps_smooth = instant_fps
+        else:
+            fps_smooth = 0.9 * fps_smooth + 0.1 * instant_fps
+
+        # Model inference = how fast the neural network runs (one forward pass)
+        # Pipeline FPS = how fast the whole application can process frames
+        stats_text = f"Pipeline FPS: {fps_smooth:.1f} | Model inference: {inference_ms:.1f} ms"
+
+        cv2.putText(
+            frame,
+            stats_text,
+            (20, 35),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 255, 0),
+            2,
+            cv2.LINE_AA,
+        )
 
         cv2.imshow("YOLOv3 Webcam Detection", frame)
 
