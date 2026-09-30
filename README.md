@@ -4,7 +4,7 @@
 - A full end-to-end object detection implementation example
 - A portfolio project demonstrating PyTorch and object detection experience
 
-### The requirements of the Python environment are stored in requirements.txt. The model is stored separately. 
+### The requirements of the Python environment are stored in requirements.txt. The model is stored separately (release). 
 
 ### Trained on NVIDIA GeForce RTX 4070 Ti.
 
@@ -20,22 +20,27 @@ This result was obtained with:
 - LR schedule: 2-epoch linear warmup followed by cosine annealing
 - Minimum LR: 1e-6
 - Duration: 50 epochs
-- Augmentation experiments: horizontal flip, HSV, affine, crop, dropout 
+- Augmentation experiments: horizontal flip, HSV, affine, crop, dropout
+
+### Live webcam inference:
+
+Tested on Ubuntu with:
+- GPU: NVIDIA GeForce GTX 1650 Ti
+- Input size: 416×416
+- End-to-end pipeline: ~17–18 FPS
+- Model forward-pass latency: ~23–45 ms
+- Runtime: PyTorch + CUDA 
  
-### Executable files
+
+### Executable scripts
+
+Note: The scripts currently use hardcoded local paths. Update the paths to match your local environment before running them.
 
 ### random_image_detector.py:
 
 	Please start this script from the same folder where the model and project's .py files are.
 	It can handle any image resolutions and accepts the following extensions: .jpg, .jpeg, .png, .bmp, .webp 
-	It takes the test image from the hardcoded folders. If there are multiple images, the selection is random.
-
-	# For COCO val images
-	image_dir = r"C:\Users\viktor.acs\Downloads\coco_dataset\val2017"
-	OR
-	# For custom images
-	image_dir = r"C:\Users\viktor.acs\Downloads\coco_dataset\test_images"
-
+	If there are multiple images, the selection is random.
 	There are no additional parameters, just simply run: python random_image_detector.py
 	The image with YOLO-style predictions (prediction_result.jpg) will be saved to the same folder where the script is. 
 	You can set the NMS and the confidence threshold in the "decode_predictions" function manually:
