@@ -2,6 +2,8 @@ import warnings
 import cv2
 import torch
 import time
+import os
+from datetime import datetime
 from torchvision import transforms
 from YOLO_with_ResNet50 import YOLOv3
 
@@ -13,6 +15,11 @@ from YOLO_with_ResNet50 import YOLOv3
 CHECKPOINT_PATH = "models/yolov3_checkpoint_last_epoch.pth"
 CONF_THRESHOLD = 0.60
 NMS_THRESHOLD = 0.40
+SCREENSHOT_DIR = "webcam_screenshots"
+VIDEO_DIR = "webcam_recordings"
+
+os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+os.makedirs(VIDEO_DIR, exist_ok=True)
 
 # ============================================================
 # Warnings
@@ -145,13 +152,17 @@ if not cap.isOpened():
     raise RuntimeError("Could not open webcam")
 
 print("[I] Webcam opened successfully.")
-print("[I] Press Q to quit.")
+print("[I] Controls: Q/Esc = quit | S = screenshot | R = start/stop recording")
 
 # ============================================================
 # Inference loop
 # ============================================================
 
 processed = 0
+
+recording = False
+
+writer = None
 
 print("[I] Starting video inference...")
 
@@ -337,12 +348,68 @@ try:
 
         cv2.imshow("YOLOv3 Webcam Detection", frame)
 
-        if cv2.waitKey(1) & 0xFF == ord("q"):
+        # Write annotated frame if recording is active
+        if recording and writer is not None:
+            writer.write(frame)
+
+        key = cv2.waitKey(1) & 0xFF
+
+        if key in (ord("q"), ord("Q"), 27):
             print("[I] Webcam detection stopped by user.")
             break
 
+        elif key in (ord("s"), ord("S")):
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            screenshot_path = os.path.join(
+                SCREENSHOT_DIR,
+                f"webcam_detection_{timestamp}.jpg"
+            )
+
+            cv2.imwrite(screenshot_path, frame)
+
+            print(f"[I] Screenshot saved to: {screenshot_path}")
+
+        elif key in (ord("r"), ord("R")):
+
+            if not recording:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+                video_path = os.path.join(
+                    VIDEO_DIR,
+                    f"webcam_detection_{timestamp}.mp4"
+                )
+
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+
+                writer = cv2.VideoWriter(
+                    video_path,
+                    fourcc,
+                    18.0,
+                    (W, H),
+                )
+
+                if not writer.isOpened():
+                    print("[E] Could not start video recording.")
+                    writer = None
+
+                else:
+                    recording = True
+                    print(f"[I] Recording started: {video_path}")
+
+            else:
+                recording = False
+
+                if writer is not None:
+                    writer.release()
+                    writer = None
+
+                print("[I] Recording stopped.")
+
 finally:
     cap.release()
+    if writer is not None:
+        writer.release()
     cv2.destroyAllWindows()
 
 
